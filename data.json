@@ -1,0 +1,283 @@
+{
+  "users": [
+    {
+      "pseudo": "Magellan",
+      "password": "$2b$10$MR4FZ2pda4LsOG0PkScmfuC4b4alBttGB4e4L.wJty0kDHYxlQFVu",
+      "avatar": "/avatars/avatar-a8755476.png",
+      "bio": "Nous sommes là pour toutes achat et vente de cryptomonnaie",
+      "createdAt": "2026-04-22T19:00:25.143Z",
+      "online": true,
+      "lastSeen": "2026-04-22T21:44:50.688Z",
+      "blockedUsers": [],
+      "hiddenChats": {},
+      "ephemeralSettings": {}
+    },
+    {
+      "pseudo": "Devoue",
+      "password": "$2b$10$Vj/pG7OVijbs2TLpXSgplOSi1./6tmdMxoje3BqZhhXiUTxKIo8t2",
+      "avatar": "https://api.dicebear.com/7.x/initials/svg?seed=Devoue&backgroundColor=2aabee&fontFamily=Helvetica",
+      "bio": "",
+      "createdAt": "2026-04-22T19:02:43.771Z",
+      "online": true,
+      "lastSeen": "2026-04-22T21:43:18.050Z",
+      "blockedUsers": [],
+      "hiddenChats": {
+        "private:Magellan": "2026-04-22T21:33:04.949Z"
+      },
+      "ephemeralSettings": {}
+    }
+  ],
+  "messages": [
+    {
+      "id": "a01be849-0d69-4c02-8f01-650646f02816",
+      "type": "private",
+      "isSecret": false,
+      "from": "Devoue",
+      "to": "Magellan",
+      "content": "Salut bro",
+      "fileUrl": null,
+      "fileName": null,
+      "fileType": null,
+      "replyTo": null,
+      "date": "2026-04-22T19:03:13.677Z",
+      "readBy": [
+        "Devoue",
+        "Magellan"
+      ],
+      "reactions": {}
+    },
+    {
+      "id": "116ef064-c27b-4898-a08d-83ff109b0b69",
+      "type": "private",
+      "isSecret": false,
+      "from": "Magellan",
+      "to": "Devoue",
+      "content": "Frère, comment vas-tu ?😂",
+      "fileUrl": null,
+      "fileName": null,
+      "fileType": null,
+      "replyTo": null,
+      "date": "2026-04-22T19:04:19.116Z",
+      "readBy": [
+        "Magellan",
+        "Devoue"
+      ],
+      "reactions": {}
+    },
+    {
+      "id": "d3272c45-84e0-4ef9-8a29-2c31f5e68e44",
+      "type": "group",
+      "groupId": "feb61fd3-b840-441e-95c3-5e7de0ef46ab",
+      "from": "Devoue",
+      "content": "Merci pour l'ajout boss",
+      "fileUrl": null,
+      "fileName": null,
+      "fileType": null,
+      "replyTo": null,
+      "date": "2026-04-22T19:08:33.137Z",
+      "readBy": [
+        "Devoue",
+        "Magellan"
+      ],
+      "reactions": {}
+    },
+    {
+      "id": "3f7dfcad-d7be-4cb4-8144-02dbfae6ec81",
+      "type": "group",
+      "groupId": "feb61fd3-b840-441e-95c3-5e7de0ef46ab",
+      "from": "Magellan",
+      "content": "C'est rien champion",
+      "fileUrl": null,
+      "fileName": null,
+      "fileType": null,
+      "replyTo": null,
+      "date": "2026-04-22T19:08:50.132Z",
+      "readBy": [
+        "Magellan",
+        "Devoue"
+      ],
+      "reactions": {}
+    },
+    {
+      "id": "c8ab2d8a-5bca-4240-9506-8364d477ef1d",
+      "type": "private",
+      "isSecret": false,
+      "from": "Magellan",
+      "to": "Devoue",
+      "content": "T'es là ?",
+      "fileUrl": null,
+      "fileName": null,
+      "fileType": null,
+      "replyTo": null,
+      "date": "2026-04-22T21:01:23.909Z",
+      "readBy": [
+        "Magellan",
+        "Devoue"
+      ],
+      "reactions": {}
+    },
+    {
+      "id": "3629b29a-2dcd-4289-9618-00a0a58e2053",
+      "type": "group",
+      "groupId": "feb61fd3-b840-441e-95c3-5e7de0ef46ab",
+      "from": "Magellan",
+      "content": "Hello",
+      "fileUrl": null,
+      "fileName": null,
+      "fileType": null,
+      "replyTo": null,
+      "date": "2026-04-22T21:01:37.145Z",
+      "readBy": [
+        "Magellan",
+        "Devoue"
+      ],
+      "reactions": {}
+    },
+    {
+      "id": "6926a5c5-ea63-4851-a921-98ce03d07192",
+      "type": "private",
+      "isSecret": false,
+      "from": "Devoue",
+      "to": "Magellan",
+      "content": "Oui oui",
+      "fileUrl": null,
+      "fileName": null,
+      "fileType": null,
+      "replyTo": null,
+      "date": "2026-04-22T21:02:04.555Z",
+      "readBy": [
+        "Devoue",
+        "Magellan"
+      ],
+      "reactions": {}
+    },
+    {
+      "id": "3e13f47f-3391-462b-8e72-cdf2c1717734",
+      "type": "private",
+      "isSecret": false,
+      "from": "Devoue",
+      "to": "Magellan",
+      "content": "On dit quoi ?",
+      "fileUrl": null,
+      "fileName": null,
+      "fileType": null,
+      "replyTo": null,
+      "date": "2026-04-22T21:09:13.072Z",
+      "readBy": [
+        "Devoue",
+        "Magellan"
+      ],
+      "reactions": {}
+    },
+    {
+      "id": "7852de82-056e-48c9-a958-44d56d14cd6d",
+      "type": "group",
+      "groupId": "feb61fd3-b840-441e-95c3-5e7de0ef46ab",
+      "from": "Devoue",
+      "content": "Yes",
+      "fileUrl": null,
+      "fileName": null,
+      "fileType": null,
+      "replyTo": null,
+      "date": "2026-04-22T21:09:23.040Z",
+      "readBy": [
+        "Devoue",
+        "Magellan"
+      ],
+      "reactions": {}
+    },
+    {
+      "id": "a5eed73b-e6a6-4a37-83b4-930a9c949b17",
+      "type": "private",
+      "isSecret": false,
+      "from": "Magellan",
+      "to": "Devoue",
+      "content": "Rien de bon champion",
+      "fileUrl": null,
+      "fileName": null,
+      "fileType": null,
+      "replyTo": null,
+      "date": "2026-04-22T21:09:46.828Z",
+      "readBy": [
+        "Magellan",
+        "Devoue"
+      ],
+      "reactions": {}
+    },
+    {
+      "id": "c14b51ec-9bfe-464f-8788-3cf6e07c148e",
+      "type": "private",
+      "isSecret": false,
+      "isEphemeral": false,
+      "expiresAt": null,
+      "from": "Magellan",
+      "to": "Devoue",
+      "content": "😅",
+      "fileUrl": null,
+      "fileName": null,
+      "fileType": null,
+      "replyTo": null,
+      "date": "2026-04-22T21:32:50.637Z",
+      "readBy": [
+        "Magellan",
+        "Devoue"
+      ],
+      "reactions": {}
+    },
+    {
+      "id": "07b45003-9fc0-4391-892d-418f613ddb10",
+      "type": "private",
+      "isSecret": false,
+      "isEphemeral": false,
+      "expiresAt": null,
+      "from": "Devoue",
+      "to": "Magellan",
+      "content": "Boss",
+      "fileUrl": null,
+      "fileName": null,
+      "fileType": null,
+      "replyTo": null,
+      "date": "2026-04-22T21:44:14.007Z",
+      "readBy": [
+        "Devoue",
+        "Magellan"
+      ],
+      "reactions": {}
+    }
+  ],
+  "groups": [
+    {
+      "id": "feb61fd3-b840-441e-95c3-5e7de0ef46ab",
+      "name": "GSAM TERMINALE D",
+      "description": "Venez, on garde le contact.",
+      "members": [
+        "Magellan",
+        "Devoue"
+      ],
+      "admins": [
+        "Magellan"
+      ],
+      "banned": [],
+      "creator": "Magellan",
+      "isPublic": false,
+      "avatar": "https://api.dicebear.com/7.x/initials/svg?seed=GSAM%20TERMINALE%20D&backgroundColor=2aabee",
+      "createdAt": "2026-04-22T19:07:50.823Z"
+    }
+  ],
+  "statuses": [
+    {
+      "id": "77498901-947d-4b38-88e3-7509092d537f",
+      "userPseudo": "Devoue",
+      "text": "Je l'ai fait.",
+      "mediaUrl": null,
+      "fileType": null,
+      "fileName": null,
+      "createdAt": "2026-04-22T21:30:08.893Z",
+      "expiresAt": "2026-04-23T21:30:08.893Z",
+      "viewedBy": [
+        "Devoue",
+        "Magellan"
+      ]
+    }
+  ]
+}

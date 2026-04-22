@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: devchat
+    runtime: node
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: DATA_FILE
+        value: /opt/render/project/src/storage/data.json
+      - key: UPLOADS_DIR
+        value: /opt/render/project/src/storage/uploads
+      - key: AVATARS_DIR
+        value: /opt/render/project/src/storage/avatars
+    disk:
+      name: storage
+      mountPath: /opt/render/project/src/storage
+      sizeGB: 1

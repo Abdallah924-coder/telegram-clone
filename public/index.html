@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#2aabee">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <link rel="manifest" href="/manifest.json">
+    <link rel="icon" href="/icons/favicon.ico">
+    <title>DevChat</title>
+    <link href="https://fonts.googleapis.com/css2?family=SF+Pro+Display:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="style.css">
+    <script src="/socket.io/socket.io.js"></script>
+</head>
+<body>
+
+<div id="authLaunch" class="auth-launch">
+    <div class="auth-launch-plane">
+        <i class="fab fa-telegram-plane"></i>
+    </div>
+    <div class="auth-launch-trail"></div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     AUTH SCREEN
+════════════════════════════════════════════════════════════════════════════ -->
+<div id="authScreen" class="auth-screen">
+    <div class="auth-bg">
+        <div class="auth-orb auth-orb-1"></div>
+        <div class="auth-orb auth-orb-2"></div>
+        <div class="auth-orb auth-orb-3"></div>
+    </div>
+
+    <!-- Login Panel -->
+    <div id="loginPanel" class="auth-card active">
+        <div class="auth-logo">
+            <div class="auth-logo-icon">
+                <i class="fab fa-telegram-plane"></i>
+            </div>
+            <h1>DevChat</h1>
+            <p>Messagerie instantanée pour développeurs</p>
+        </div>
+        <div class="auth-form">
+            <div class="auth-input-wrap">
+                <i class="fas fa-at"></i>
+                <input type="text" id="loginPseudo" placeholder="Pseudo" autocomplete="off" autocorrect="off" autocapitalize="off">
+            </div>
+            <div class="auth-input-wrap">
+                <i class="fas fa-lock"></i>
+                <input type="password" id="loginPassword" placeholder="Mot de passe" autocomplete="current-password">
+                <button class="toggle-pw" onclick="togglePw('loginPassword')"><i class="fas fa-eye"></i></button>
+            </div>
+            <button id="loginBtn" class="auth-btn">
+                <span>Se connecter</span>
+                <i class="fas fa-arrow-right"></i>
+            </button>
+            <div class="auth-links">
+                <a href="#" onclick="showPanel('registerPanel')">Créer un compte</a>
+                <span>·</span>
+                <a href="#" onclick="showPanel('resetPanel')">Mot de passe oublié</a>
+            </div>
+        </div>
+        <div id="loginError" class="auth-error"></div>
+    </div>
+
+    <!-- Register Panel -->
+    <div id="registerPanel" class="auth-card">
+        <div class="auth-logo">
+            <div class="auth-logo-icon">
+                <i class="fas fa-user-plus"></i>
+            </div>
+            <h1>Inscription</h1>
+            <p>Créez votre compte DevChat</p>
+        </div>
+        <!-- Avatar preview -->
+        <div class="avatar-upload-wrap">
+            <div class="avatar-preview" id="regAvatarPreview">
+                <i class="fas fa-camera"></i>
+            </div>
+            <input type="file" id="regAvatarFile" accept="image/*" style="display:none">
+            <small>Photo de profil (optionnel)</small>
+        </div>
+        <div class="auth-form">
+            <div class="auth-input-wrap">
+                <i class="fas fa-at"></i>
+                <input type="text" id="regPseudo" placeholder="Pseudo" autocomplete="off" autocorrect="off" autocapitalize="off">
+            </div>
+            <div class="auth-input-wrap">
+                <i class="fas fa-lock"></i>
+                <input type="password" id="regPassword" placeholder="Mot de passe">
+                <button class="toggle-pw" onclick="togglePw('regPassword')"><i class="fas fa-eye"></i></button>
+            </div>
+            <div class="auth-input-wrap">
+                <i class="fas fa-lock"></i>
+                <input type="password" id="regPassword2" placeholder="Confirmer le mot de passe">
+            </div>
+            <button id="registerBtn" class="auth-btn">
+                <span>S'inscrire</span>
+                <i class="fas fa-check"></i>
+            </button>
+            <div class="auth-links">
+                <a href="#" onclick="showPanel('loginPanel')">Déjà un compte ? Se connecter</a>
+            </div>
+        </div>
+        <div id="registerError" class="auth-error"></div>
+    </div>
+
+    <!-- Reset Panel -->
+    <div id="resetPanel" class="auth-card">
+        <div class="auth-logo">
+            <div class="auth-logo-icon">
+                <i class="fas fa-key"></i>
+            </div>
+            <h1>Réinitialiser</h1>
+            <p>Changez votre mot de passe</p>
+        </div>
+        <div class="auth-form">
+            <div class="auth-input-wrap">
+                <i class="fas fa-at"></i>
+                <input type="text" id="resetPseudo" placeholder="Votre pseudo">
+            </div>
+            <div class="auth-input-wrap">
+                <i class="fas fa-lock"></i>
+                <input type="password" id="resetNewPw" placeholder="Nouveau mot de passe">
+            </div>
+            <button id="resetBtn" class="auth-btn">
+                <span>Réinitialiser</span>
+                <i class="fas fa-check"></i>
+            </button>
+            <div class="auth-links">
+                <a href="#" onclick="showPanel('loginPanel')">← Retour à la connexion</a>
+            </div>
+        </div>
+        <div id="resetError" class="auth-error"></div>
+        <div id="resetSuccess" class="auth-success"></div>
+    </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     MAIN APP SCREEN
+════════════════════════════════════════════════════════════════════════════ -->
+<div id="mainScreen" class="main-screen" style="display:none">
+
+    <!-- ── SIDEBAR ──────────────────────────────────────────────────────── -->
+    <aside class="sidebar" id="sidebar">
+
+        <!-- Header -->
+        <div class="sidebar-header">
+            <button class="icon-btn" id="menuBtn" title="Menu">
+                <div class="hamburger">
+                    <span></span><span></span><span></span>
+                </div>
+            </button>
+            <div class="sidebar-title">DevChat</div>
+            <button class="icon-btn" id="newChatBtn" title="Nouveau chat">
+                <i class="fas fa-edit"></i>
+            </button>
+        </div>
+
+        <!-- Search -->
+        <div class="sidebar-search">
+            <div class="search-wrap">
+                <i class="fas fa-search"></i>
+                <input type="text" id="sidebarSearch" placeholder="Rechercher...">
+                <button id="searchClearBtn" style="display:none"><i class="fas fa-times"></i></button>
+            </div>
+        </div>
+
+        <!-- Search Results -->
+        <div id="searchResultsPanel" class="search-results-panel" style="display:none">
+            <div class="search-results-list" id="searchResultsList"></div>
+        </div>
+
+        <div class="status-strip" id="statusStrip"></div>
+
+        <!-- Conversations -->
+        <div class="conversations-list" id="conversationsList"></div>
+
+        <!-- Bottom Nav -->
+        <div class="sidebar-bottom">
+            <button class="icon-btn" id="exploreBtn" title="Explorer les groupes publics">
+                <i class="fas fa-compass"></i>
+            </button>
+            <button class="icon-btn" id="newGroupSideBtn" title="Nouveau groupe">
+                <i class="fas fa-users"></i>
+            </button>
+            <button class="icon-btn" id="profileBtn" title="Mon profil">
+                <img id="sidebarUserAvatar" src="" alt="" class="sidebar-avatar">
+            </button>
+        </div>
+    </aside>
+
+    <!-- ── LEFT DRAWER (Menu) ────────────────────────────────────────────── -->
+    <div class="drawer-overlay" id="drawerOverlay"></div>
+    <div class="drawer" id="drawer">
+        <div class="drawer-profile">
+            <img id="drawerAvatar" src="" alt="">
+            <div>
+                <div class="drawer-name" id="drawerPseudo"></div>
+                <div class="drawer-status">En ligne</div>
+            </div>
+        </div>
+        <nav class="drawer-nav">
+            <a href="#" onclick="openDrawerSection('profile')"><i class="fas fa-user"></i> Mon profil</a>
+            <a href="#" onclick="openDrawerSection('explore')"><i class="fas fa-compass"></i> Explorer</a>
+            <a href="#" onclick="openDrawerSection('newgroup')"><i class="fas fa-users"></i> Nouveau groupe</a>
+            <a href="#" onclick="openDrawerSection('secret')"><i class="fas fa-lock"></i> Chat secret</a>
+            <a href="#" id="logoutBtn"><i class="fas fa-sign-out-alt"></i> Déconnexion</a>
+        </nav>
+    </div>
+
+    <!-- ── CHAT AREA ─────────────────────────────────────────────────────── -->
+    <main class="chat-area" id="chatArea">
+
+        <!-- Welcome State -->
+        <div class="chat-welcome" id="chatWelcome">
+            <div class="welcome-icon"><i class="fab fa-telegram-plane"></i></div>
+            <h2>DevChat</h2>
+            <p>Sélectionnez une conversation ou recherchez un utilisateur</p>
+        </div>
+
+        <!-- Chat Header -->
+        <div class="chat-header" id="chatHeader" style="display:none">
+            <button class="icon-btn back-btn" id="backBtn"><i class="fas fa-arrow-left"></i></button>
+            <div class="chat-header-info" id="chatHeaderInfo">
+                <div class="chat-header-avatar-wrap">
+                    <img id="chatAvatar" src="" alt="" class="chat-avatar">
+                    <span class="online-dot" id="chatOnlineDot"></span>
+                </div>
+                <div class="chat-header-text">
+                    <h3 id="currentChatName"></h3>
+                    <span id="currentChatStatus"></span>
+                </div>
+            </div>
+            <div class="chat-header-actions">
+                <button class="icon-btn" id="chatSearchBtn" title="Chercher"><i class="fas fa-search"></i></button>
+                <button class="icon-btn" id="chatMoreBtn" title="Plus"><i class="fas fa-ellipsis-v"></i></button>
+            </div>
+            <!-- Chat context menu -->
+            <div class="context-menu" id="chatContextMenu">
+                <div class="ctx-item" id="ctxViewProfile"><i class="fas fa-user"></i> Voir le profil</div>
+                <div class="ctx-item" id="ctxAddMember" style="display:none"><i class="fas fa-user-plus"></i> Ajouter un membre</div>
+                <div class="ctx-item" id="ctxManageGroup" style="display:none"><i class="fas fa-cog"></i> Gérer le groupe</div>
+                <div class="ctx-item danger" id="ctxLeaveGroup" style="display:none"><i class="fas fa-sign-out-alt"></i> Quitter le groupe</div>
+                <div class="ctx-item" id="ctxDeleteChat"><i class="fas fa-trash-alt"></i> Supprimer le chat</div>
+                <div class="ctx-item ctx-secret" id="ctxEphemeralMode" style="display:none"><i class="fas fa-hourglass-half"></i> Message éphémère</div>
+                <div class="ctx-item danger" id="ctxBlockUser" style="display:none"><i class="fas fa-ban"></i> Bloquer</div>
+                <div class="ctx-item ctx-secret" id="ctxSecretChat" style="display:none"><i class="fas fa-lock"></i> Chat secret</div>
+            </div>
+        </div>
+
+        <!-- Messages Container -->
+        <div class="messages-container" id="messagesContainer"></div>
+
+        <!-- Typing Indicator -->
+        <div class="typing-indicator" id="typingIndicator" style="display:none">
+            <div class="typing-bubble">
+                <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+            </div>
+            <span id="typingText"></span>
+        </div>
+
+        <!-- Reply Preview -->
+        <div class="reply-preview" id="replyPreview" style="display:none">
+            <div class="reply-line"></div>
+            <div class="reply-content">
+                <div class="reply-author" id="replyAuthor"></div>
+                <div class="reply-text" id="replyText"></div>
+            </div>
+            <button onclick="cancelReply()"><i class="fas fa-times"></i></button>
+        </div>
+
+        <!-- Input Area -->
+        <div class="message-input-area" id="messageInputArea" style="display:none">
+            <button class="icon-btn attach-btn" id="attachBtn"><i class="fas fa-paperclip"></i></button>
+            <div class="input-wrapper">
+                <button class="emoji-inline-btn" id="emojiBtn"><i class="far fa-smile-wink"></i></button>
+                <textarea id="messageInput" placeholder="Message..." rows="1" autocomplete="off"></textarea>
+            </div>
+            <button class="send-btn" id="sendBtn">
+                <i class="fas fa-paper-plane"></i>
+            </button>
+            <button class="send-btn voice-btn" id="voiceBtn" style="display:none">
+                <i class="fas fa-microphone"></i>
+            </button>
+        </div>
+        <input type="file" id="fileInput" style="display:none" accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.zip">
+
+    </main>
+
+    <!-- ── RIGHT PANEL (Profile / Group info) ───────────────────────────── -->
+    <div class="right-panel" id="rightPanel">
+        <div class="right-panel-header">
+            <button class="icon-btn" onclick="closeRightPanel()"><i class="fas fa-times"></i></button>
+            <h3 id="rightPanelTitle">Informations</h3>
+        </div>
+        <div class="right-panel-body" id="rightPanelBody"></div>
+    </div>
+
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     MODALS
+════════════════════════════════════════════════════════════════════════════ -->
+
+<!-- New Group Modal -->
+<div id="newGroupModal" class="modal">
+    <div class="modal-box">
+        <div class="modal-header">
+            <h3><i class="fas fa-users"></i> Nouveau groupe</h3>
+            <button class="icon-btn close-modal-btn" data-modal="newGroupModal"><i class="fas fa-times"></i></button>
+        </div>
+        <div class="modal-body">
+            <div class="group-avatar-row">
+                <div class="group-avatar-preview" id="groupAvatarPreview">
+                    <i class="fas fa-camera"></i>
+                </div>
+            </div>
+            <div class="form-row">
+                <input type="text" id="groupName" placeholder="Nom du groupe" class="modal-input">
+            </div>
+            <div class="form-row">
+                <input type="text" id="groupDesc" placeholder="Description (optionnel)" class="modal-input">
+            </div>
+            <div class="form-row toggle-row">
+                <label>Groupe public</label>
+                <div class="toggle-switch">
+                    <input type="checkbox" id="groupPublic">
+                    <span class="toggle-slider"></span>
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="member-search-wrap">
+                    <input type="text" id="memberSearchInput" placeholder="Ajouter membres par pseudo..." class="modal-input">
+                    <div id="memberSearchDropdown" class="member-search-dropdown" style="display:none"></div>
+                </div>
+            </div>
+            <div id="selectedMembersList" class="selected-members"></div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn-secondary close-modal-btn" data-modal="newGroupModal">Annuler</button>
+            <button class="btn-primary" id="createGroupBtn">Créer</button>
+        </div>
+    </div>
+</div>
+
+<!-- Explore Public Groups Modal -->
+<div id="exploreModal" class="modal">
+    <div class="modal-box">
+        <div class="modal-header">
+            <h3><i class="fas fa-compass"></i> Groupes publics</h3>
+            <button class="icon-btn close-modal-btn" data-modal="exploreModal"><i class="fas fa-times"></i></button>
+        </div>
+        <div class="modal-body">
+            <div id="publicGroupsList" class="public-groups-list"></div>
+        </div>
+    </div>
+</div>
+
+<!-- Profile Modal -->
+<div id="profileModal" class="modal">
+    <div class="modal-box">
+        <div class="modal-header">
+            <h3><i class="fas fa-user"></i> Mon profil</h3>
+            <button class="icon-btn close-modal-btn" data-modal="profileModal"><i class="fas fa-times"></i></button>
+        </div>
+        <div class="modal-body">
+            <div class="profile-avatar-wrap">
+                <img id="profileAvatar" src="" alt="">
+                <button class="profile-avatar-edit" id="changeAvatarBtn"><i class="fas fa-camera"></i></button>
+                <input type="file" id="profileAvatarFile" style="display:none" accept="image/*">
+            </div>
+            <div class="profile-pseudo" id="profilePseudo"></div>
+            <div class="form-row">
+                <textarea id="profileBio" placeholder="Bio (optionnel)" class="modal-input" rows="3"></textarea>
+            </div>
+            <div class="form-row">
+                <button class="btn-secondary" id="enableNotificationsBtn" style="width:100%">Activer les notifications</button>
+            </div>
+            <div class="profile-stats-grid" id="profileStatsGrid">
+                <div class="profile-stat-card"><span>Total users</span><strong id="statUsers">-</strong></div>
+                <div class="profile-stat-card"><span>En ligne</span><strong id="statOnlineUsers">-</strong></div>
+                <div class="profile-stat-card"><span>Groupes</span><strong id="statGroups">-</strong></div>
+                <div class="profile-stat-card"><span>Messages</span><strong id="statMessages">-</strong></div>
+                <div class="profile-stat-card"><span>Statuts actifs</span><strong id="statStatuses">-</strong></div>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn-primary" id="saveProfileBtn">Enregistrer</button>
+        </div>
+    </div>
+</div>
+
+<!-- Manage Group Modal -->
+<div id="manageGroupModal" class="modal">
+    <div class="modal-box">
+        <div class="modal-header">
+            <h3><i class="fas fa-cog"></i> Gérer le groupe</h3>
+            <button class="icon-btn close-modal-btn" data-modal="manageGroupModal"><i class="fas fa-times"></i></button>
+        </div>
+        <div class="modal-body">
+            <div id="manageMembersList" class="members-manage-list"></div>
+            <div class="form-row" style="margin-top:16px">
+                <input type="text" id="addMemberInput" placeholder="Ajouter un membre (pseudo)" class="modal-input">
+                <button class="btn-primary" id="addMemberBtn" style="margin-top:8px;width:100%">Ajouter</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div id="statusComposerModal" class="modal">
+    <div class="modal-box">
+        <div class="modal-header">
+            <h3><i class="fas fa-circle-notch"></i> Mes statuts</h3>
+            <button class="icon-btn close-modal-btn" data-modal="statusComposerModal"><i class="fas fa-times"></i></button>
+        </div>
+        <div class="modal-body">
+            <div class="form-row">
+                <textarea id="statusTextInput" placeholder="Écrivez un statut..." class="modal-input" rows="3"></textarea>
+            </div>
+            <div class="form-row">
+                <button class="btn-secondary" id="pickStatusMediaBtn" style="width:100%">Ajouter une image ou vidéo</button>
+                <input type="file" id="statusMediaInput" style="display:none" accept="image/*,video/*">
+            </div>
+            <div id="statusComposerPreview" class="status-composer-preview"></div>
+            <div id="myStatusesList" class="my-statuses-list"></div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn-primary" id="publishStatusBtn">Publier</button>
+        </div>
+    </div>
+</div>
+
+<div id="statusViewerModal" class="modal">
+    <div class="modal-box status-viewer-box">
+        <div class="modal-header">
+            <h3 id="statusViewerTitle"><i class="fas fa-circle-notch"></i> Statut</h3>
+            <button class="icon-btn close-modal-btn" data-modal="statusViewerModal"><i class="fas fa-times"></i></button>
+        </div>
+        <div class="modal-body status-viewer-body">
+            <div class="status-viewer-meta" id="statusViewerMeta"></div>
+            <div class="status-viewer-content" id="statusViewerContent"></div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn-secondary" id="prevStatusBtn">Précédent</button>
+            <button class="btn-primary" id="nextStatusBtn">Suivant</button>
+        </div>
+    </div>
+</div>
+
+<!-- Image Viewer -->
+<div id="imageViewer" class="modal image-viewer-modal">
+    <div class="image-viewer-overlay" onclick="document.getElementById('imageViewer').style.display='none'">
+        <img id="imageViewerImg" src="" alt="">
+    </div>
+</div>
+
+<!-- Emoji Picker Container -->
+<div id="emojiPickerContainer" class="emoji-picker-container" style="display:none"></div>
+
+<!-- Toast -->
+<div id="toast" class="toast"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/emoji-mart@5.5.2/dist/browser.js"></script>
+<script src="script.js?v=20260422-2"></script>
+<script>
+    if ('serviceWorker' in navigator) {
+        if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') {
+            navigator.serviceWorker.getRegistrations().then(registrations => {
+                registrations.forEach(reg => reg.unregister());
+            });
+            caches.keys().then(keys => {
+                keys.forEach(key => caches.delete(key));
+            });
+        } else {
+            navigator.serviceWorker.register('/sw.js').then(() => {
+                console.log('SW registered');
+            });
+        }
+    }
+</script>
+</body>
+</html>
