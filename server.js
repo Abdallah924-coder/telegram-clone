@@ -1265,8 +1265,22 @@ async function bootstrap() {
     groups = (loaded.groups || []).map(ensureGroupDefaults);
     statuses = (loaded.statuses || []).filter(status => !isExpired(status.expiresAt));
 
+    // ── Log tous les users chargés depuis MongoDB ─────────────
+    const allPseudos = Object.keys(persistentUsers);
+    console.log(`📦 Users chargés depuis MongoDB: [${allPseudos.join(', ')}]`);
+
     ensureAdminAccount();
     ensureUpdatesChannel();
+
+    // ── Vérification finale admin ──────────────────────────────
+    const adminPseudo = (process.env.ADMIN_PSEUDO || 'Magellan').trim();
+    const finalAdmin = persistentUsers[adminPseudo];
+    if (finalAdmin) {
+        console.log(`🔑 Admin final: "${adminPseudo}" isAdmin=${finalAdmin.isAdmin}`);
+    } else {
+        console.warn(`⚠️  Pseudo "${adminPseudo}" introuvable. Users dispo: [${Object.keys(persistentUsers).join(', ')}]`);
+    }
+
     saveData();
 
     setInterval(() => {
