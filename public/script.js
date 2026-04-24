@@ -1,7 +1,14 @@
 // ═══════════════════════════════════════════════════════════════
 //  DevChat - Client Script
 // ═══════════════════════════════════════════════════════════════
-const socket = io({ transports: ['websocket', 'polling'] });
+const socket = io({
+    transports: ['websocket', 'polling'],
+    reconnection: true,
+    reconnectionAttempts: Infinity,
+    reconnectionDelay: 1000,
+    reconnectionDelayMax: 5000,
+    timeout: 45000
+});
 
 // ── State ──────────────────────────────────────────────────────
 let currentUser   = null;   // { pseudo, avatar, bio }
@@ -338,6 +345,7 @@ function onAuthSuccess(res) {
 
     updateSidebarUser();
     setupSocketListeners();
+    setupReconnectHandler();
     playAuthLaunch().then(() => {
         $('authScreen').style.display = 'none';
         $('mainScreen').style.display = 'flex';
@@ -2316,5 +2324,93 @@ if ('serviceWorker' in navigator) {
 window.addEventListener('resize', () => {
     if (window.innerWidth > 768) {
         $('sidebar').classList.remove('hidden');
+    }
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  AUTO-RECONNEXION — restaure la session sans reload
+// ═══════════════════════════════════════════════════════════════
+function setupReconnectHandler() {
+    let reconnectBanner = null;
+
+    function showReconnectBanner() {
+        if (reconnectBanner) return;
+        reconnectBanner = document.createElement('div');
+        reconnectBanner.id = 'reconnectBanner';
+        reconnectBanner.style.cssText = `
+            position:fixed;top:0;left:0;right:0;z-index:99999;
+            background:#e53935;color:#fff;text-align:center;
+            padding:10px;font-size:13px;font-weight:600;
+            display:flex;align-items:center;justify-content:center;gap:8px;
+        `;
+        reconnectBanner.innerHTML = `<i class="fas fa-wifi"></i> Reconnexion en cours...`;
+        document.body.appendChild(reconnectBanner);
+    }
+
+    function hideReconnectBanner() {
+        if (reconnectBanner) {
+            reconnectBanner.remove();
+            reconnectBanner = null;
+        }
+    }
+
+    socket.on('disconnect', (reason) => {
+        console.log('[Socket] Déconnecté:', reason);
+        // Ne pas montrer la bannière si c'est une déconnexion volontaire (logout)
+        if (reason === 'io client disconnect') return;
+        showReconnectBanner();
+    });
+
+    socket.on('connect', () => {
+        console.log('[Socket] Connecté:', socket.id);
+        hideReconnectBanner();
+
+        // Si on était déjà connecté (reconnexion), restaurer la session
+        if (currentUser) {
+            console.log('[Socket] Restauration session pour:', currentUser.pseudo);
+            const stored = sessionStorage.getItem('devchat_auth');
+            if (!stored) return;
+            const { pseudo, password } = JSON.parse(stored);
+
+            socket.emit('auth', { pseudo, password, isRegister: false }, (res) => {
+                if (res.success) {
+                    // Mettre à jour les données sans réinitialiser l'UI
+                    currentUser   = res.user;
+                    groups        = res.groups   || groups;
+                    allUsers      = res.users    || allUsers;
+                    // Fusionner les nouveaux messages sans dupliquer
+                    (res.messages || []).forEach(m => {
+                        if (!messages.find(x => x.id === m.id)) messages.push(m);
+                    });
+                    renderConversationsList();
+                    // Recharger le chat ouvert si nécessaire
+                    if (currentChat) {
+                        renderMessages();
+                    }
+                    showToast('✓ Reconnecté');
+                } else {
+                    console.warn('[Socket] Échec restauration session:', res.error);
+                    showToast('Session expirée — veuillez vous reconnecter');
+                    setTimeout(() => location.reload(), 2000);
+                }
+            });
+        }
+    });
+
+    socket.on('connect_error', (err) => {
+        console.warn('[Socket] Erreur connexion:', err.message);
+        showReconnectBanner();
+    });
+}
+
+// Sauvegarder les credentials en sessionStorage pour la reconnexion auto
+// (sessionStorage = effacé à la fermeture de l'onglet, pas persistant)
+const _origEmitAuth = socket.emit.bind(socket);
+socket.onAny((event, ...args) => {
+    if (event === 'auth' && args[0]?.password && !args[0]?.isRegister) {
+        sessionStorage.setItem('devchat_auth', JSON.stringify({
+            pseudo:   args[0].pseudo,
+            password: args[0].password
+        }));
     }
 });

@@ -32,7 +32,13 @@ const app = express();
 const server = http.createServer(app);
 const io = socketIo(server, {
     cors: socketCorsOrigin ? { origin: socketCorsOrigin } : undefined,
-    transports: ['websocket', 'polling']
+    transports: ['websocket', 'polling'],
+    // Garder la connexion vivante sur Render (évite la mise en veille socket)
+    pingTimeout: 60000,      // 60s avant de considérer le client mort
+    pingInterval: 25000,     // ping toutes les 25s
+    upgradeTimeout: 30000,
+    maxHttpBufferSize: 1e7,  // 10MB pour les fichiers
+    connectTimeout: 45000
 });
 
 const RENDER_STORAGE_ROOT = '/opt/render/project/src/storage';
