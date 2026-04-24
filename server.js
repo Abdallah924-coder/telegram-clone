@@ -8,6 +8,19 @@ const crypto = require('crypto');
 const { v4: uuidv4 } = require('uuid');
 const bcrypt = require('bcrypt');
 const { MongoClient } = require('mongodb');
+
+// ── Fix TLS sur Render / Node 18 avec MongoDB Atlas ─────────
+// L'erreur "tlsv1 alert internal error SSL 80" vient d'une
+// incompatibilité TLS entre le runtime Render et certains
+// clusters Atlas. On force les options TLS côté Node.
+const tls = require('tls');
+const origCreateSecure = tls.createSecureContext;
+tls.createSecureContext = function(opts) {
+    opts = opts || {};
+    if (!opts.minVersion) opts.minVersion = 'TLSv1.2';
+    if (!opts.maxVersion) opts.maxVersion = 'TLSv1.3';
+    return origCreateSecure(opts);
+};
 const socketCorsOrigin = process.env.CORS_ORIGIN
     ? process.env.CORS_ORIGIN.split(',').map(origin => origin.trim()).filter(Boolean)
     : undefined;
@@ -197,7 +210,17 @@ function writeLocalSnapshot(snapshot) {
 
 async function connectMongo() {
     if (!MONGODB_URI) return false;
-    mongoClient = new MongoClient(MONGODB_URI, { ignoreUndefined: true });
+    mongoClient = new MongoClient(MONGODB_URI, {
+        ignoreUndefined: true,
+        tls: true,
+        tlsAllowInvalidCertificates: false,
+        serverSelectionTimeoutMS: 15000,
+        connectTimeoutMS: 15000,
+        socketTimeoutMS: 45000,
+        maxPoolSize: 5,
+        retryWrites: true,
+        w: 'majority'
+    });
     await mongoClient.connect();
     mongoCollection = mongoClient.db(MONGODB_DB_NAME).collection(MONGODB_COLLECTION);
     return true;
