@@ -1,3 +1,18 @@
+// ── Fix SSL "tlsv1 alert internal error 80" sur Render + Node 25 ──
+// Doit être tout en haut, avant tout require réseau
+const tls = require('tls');
+const _origCreate = tls.createSecureContext;
+tls.createSecureContext = (opts = {}) => {
+    if (!opts.minVersion) opts.minVersion = 'TLSv1.2';
+    if (!opts.maxVersion) opts.maxVersion = 'TLSv1.3';
+    if (!opts.ciphers) opts.ciphers = [
+        'TLS_AES_256_GCM_SHA384','TLS_CHACHA20_POLY1305_SHA256',
+        'TLS_AES_128_GCM_SHA256','ECDHE-RSA-AES256-GCM-SHA384',
+        'ECDHE-RSA-AES128-GCM-SHA256','ECDHE-RSA-CHACHA20-POLY1305'
+    ].join(':');
+    return _origCreate(opts);
+};
+
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
