@@ -23,6 +23,14 @@ let statusUpload = null;
 let activeStatusGroup = [];
 let activeStatusIndex = 0;
 let appStats = null;
+let knownPrivateChats = [];
+let updateChannelInfo = null;
+let groupAvatarUrl = null;
+let manageGroupAvatarUrl = null;
+let authSessionToken = null;
+let selectedStatusTheme = 'ocean';
+let mediaRecorderStream = null;
+let selectedMessageIds = new Set();
 
 const EPHEMERAL_CHOICES = [
     { label: 'Désactivé', value: 0 },
@@ -30,9 +38,192 @@ const EPHEMERAL_CHOICES = [
     { label: '1 heure', value: 60 * 60 * 1000 },
     { label: '24 heures', value: 24 * 60 * 60 * 1000 }
 ];
+const COUNTRY_CODES = [
+    { code: '+242', label: 'Congo (+242)' },
+    { code: '+243', label: 'RDC (+243)' },
+    { code: '+33', label: 'France (+33)' },
+    { code: '+32', label: 'Belgique (+32)' },
+    { code: '+225', label: "Cote d'Ivoire (+225)" },
+    { code: '+221', label: 'Senegal (+221)' },
+    { code: '+237', label: 'Cameroun (+237)' },
+    { code: '+234', label: 'Nigeria (+234)' },
+    { code: '+1', label: 'USA/Canada (+1)' }
+];
+const STATUS_THEMES = [
+    { key: 'ocean', bg: 'linear-gradient(135deg, #0f5cc0, #23a6d5)' },
+    { key: 'sunset', bg: 'linear-gradient(135deg, #ff6a88, #ff9a44)' },
+    { key: 'forest', bg: 'linear-gradient(135deg, #0b8f6a, #74c365)' },
+    { key: 'night', bg: 'linear-gradient(135deg, #232526, #414345)' },
+    { key: 'berry', bg: 'linear-gradient(135deg, #7f00ff, #e100ff)' },
+    { key: 'gold', bg: 'linear-gradient(135deg, #8a6a00, #f7b733)' }
+];
 
 // ── DOM Shortcuts ──────────────────────────────────────────────
 const $ = id => document.getElementById(id);
+
+async function apiFetch(url, options = {}) {
+    const headers = new Headers(options.headers || {});
+    if (authSessionToken) headers.set('Authorization', `Bearer ${authSessionToken}`);
+    const response = await fetch(url, { ...options, headers });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+        throw new Error(data?.error || 'Requete impossible');
+    }
+    return data;
+}
+
+function statusThemeByKey(key) {
+    return STATUS_THEMES.find(theme => theme.key === key) || STATUS_THEMES[0];
+}
+
+function statusBackgroundStyle(key) {
+    return statusThemeByKey(key).bg;
+}
+
+function statusTextPreviewHtml(text, key) {
+    return `<div class="status-text-preview-inner">${escHtml(text || 'Votre texte de statut')}</div>`;
+}
+
+function isReadonlyOfficialChannel(chat = currentChat) {
+    if (!chat || chat.type !== 'group') return false;
+    const group = groups.find(item => item.id === chat.id);
+    return !!(group?.isUpdatesChannel && !group?.admins?.includes(currentUser?.pseudo));
+}
+
+function refreshChatComposerState() {
+    const readonly = isReadonlyOfficialChannel();
+    $('chatReadonlyNotice').style.display = readonly ? 'block' : 'none';
+    $('attachBtn').style.display = readonly ? 'none' : 'inline-flex';
+    $('emojiBtn').style.display = readonly ? 'none' : 'inline-flex';
+    $('messageInput').disabled = readonly;
+    $('messageInput').placeholder = readonly ? 'Canal officiel en lecture seule' : 'Message...';
+    updateComposerActionButtons();
+}
+
+function updateComposerActionButtons() {
+    if (!$('sendBtn') || !$('voiceBtn') || !$('messageInput')) return;
+    const canRecord = !!(navigator.mediaDevices?.getUserMedia && window.MediaRecorder);
+    if (isReadonlyOfficialChannel()) {
+        $('sendBtn').style.display = 'none';
+        $('voiceBtn').style.display = 'none';
+        return;
+    }
+    const hasText = !!$('messageInput').value.trim();
+    $('sendBtn').style.display = hasText || isRecording ? 'inline-flex' : 'none';
+    $('voiceBtn').style.display = !canRecord || hasText ? 'none' : 'inline-flex';
+}
+
+function stopVoiceStream() {
+    if (mediaRecorderStream) {
+        mediaRecorderStream.getTracks().forEach(track => track.stop());
+        mediaRecorderStream = null;
+    }
+}
+
+function clearMessageSelection() {
+    selectedMessageIds.clear();
+    $('messageSelectionBar').style.display = 'none';
+}
+
+function updateMessageSelectionUI() {
+    const count = selectedMessageIds.size;
+    $('messageSelectionBar').style.display = count ? 'flex' : 'none';
+    $('messageSelectionCount').textContent = `${count} sélectionné${count > 1 ? 's' : ''}`;
+}
+
+function toggleMessageSelection(messageId) {
+    if (!messageId) return;
+    if (selectedMessageIds.has(messageId)) selectedMessageIds.delete(messageId);
+    else selectedMessageIds.add(messageId);
+    updateMessageSelectionUI();
+    renderMessages();
+}
+
+function promptEditMessage(msg) {
+    if (!msg || msg.from !== currentUser?.pseudo || msg.deleted || msg.fileUrl) return;
+    const next = window.prompt('Modifier votre message', msg.content || '');
+    if (next === null) return;
+    socket.emit('edit-message', { messageId: msg.id, content: next }, (res) => {
+        if (!res?.success) return showToast(res?.error || 'Erreur');
+        const local = conversations.find(item => item.id === msg.id);
+        if (local) Object.assign(local, res.message);
+        renderMessages();
+        renderConversations();
+        showToast('Message modifié');
+    });
+}
+
+function addContactByPhone(phoneNumber, onSuccess) {
+    if (!phoneNumber) return;
+    const normalized = String(phoneNumber);
+    const digits = normalized.startsWith('+') ? normalized.slice(1) : normalized;
+    const code = COUNTRY_CODES
+        .map(item => item.code)
+        .sort((a, b) => b.length - a.length)
+        .find(item => normalized.startsWith(item));
+    const countryCode = code || '+242';
+    const localNumber = normalized.startsWith(countryCode) ? digits.slice(countryCode.slice(1).length) : digits;
+    socket.emit('add-contact', { countryCode, phoneNumber: localNumber }, (res) => {
+        if (!res?.success) return showToast(res?.error || 'Erreur');
+        currentUser = res.user;
+        renderContactsList();
+        if (typeof onSuccess === 'function') onSuccess();
+        showToast('Contact ajouté');
+    });
+}
+
+async function sendUploadedMessageFile(filePayload) {
+    if (!currentChat || !filePayload) return;
+    const payload = {
+        content: '',
+        fileUrl: filePayload.fileUrl,
+        fileName: filePayload.fileName,
+        fileType: filePayload.fileType,
+        replyTo: replyTo?.id || null,
+        isSecret: currentChat.type === 'private' ? !!currentChat.isSecret : false
+    };
+    if (currentChat.type === 'private') {
+        payload.to = currentChat.id;
+        socket.emit('private-message', payload, (res) => {
+            if (!res?.success) showToast(res?.error || 'Erreur d\'envoi');
+        });
+    } else {
+        payload.groupId = currentChat.id;
+        socket.emit('group-message', payload, (res) => {
+            if (!res?.success) showToast(res?.error || 'Erreur d\'envoi');
+        });
+    }
+    cancelReply();
+}
+
+function renderStatusThemePicker() {
+    const wrap = $('statusThemePicker');
+    if (!wrap) return;
+    wrap.innerHTML = STATUS_THEMES.map(theme => `
+        <button
+            type="button"
+            class="status-theme-swatch ${theme.key === selectedStatusTheme ? 'active' : ''}"
+            data-theme="${theme.key}"
+            style="background:${theme.bg}"
+            title="${theme.key}"
+        ></button>
+    `).join('');
+}
+
+function updateStatusComposerPreview() {
+    const text = $('statusTextInput').value.trim();
+    const preview = $('statusComposerPreview');
+    if (statusUpload) return;
+    if (text) {
+        preview.classList.add('status-text-preview');
+        preview.style.background = statusBackgroundStyle(selectedStatusTheme);
+        preview.innerHTML = statusTextPreviewHtml(text, selectedStatusTheme);
+    } else {
+        preview.classList.remove('status-text-preview');
+        preview.style.background = '';
+        preview.innerHTML = 'Ajoutez un texte, une image ou une vidéo';
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════
 //  AUTH SCREEN
@@ -42,25 +233,44 @@ function showPanel(id) {
     $(id).classList.add('active');
 }
 
+function initCountrySelect(id, defaultCode = '+242') {
+    const select = $(id);
+    if (!select) return;
+    select.innerHTML = COUNTRY_CODES.map(country => `<option value="${country.code}">${country.label}</option>`).join('');
+    select.value = defaultCode;
+}
+
+function initCountrySelectors() {
+    ['loginCountryCode', 'regCountryCode', 'resetCountryCode', 'profileCountryCode', 'contactCountryCode']
+        .forEach(id => initCountrySelect(id));
+}
+
+initCountrySelectors();
+
 // Avatar preview for registration
 $('regAvatarPreview').addEventListener('click', () => $('regAvatarFile').click());
 $('regAvatarFile').addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    const fd = new FormData(); fd.append('avatar', file);
-    const r = await fetch('/api/upload-avatar', { method: 'POST', body: fd });
-    const d = await r.json();
-    regAvatarUrl = d.avatarUrl;
-    $('regAvatarPreview').innerHTML = `<img src="${regAvatarUrl}" alt="">`;
+    try {
+        const fd = new FormData(); fd.append('avatar', file);
+        const data = await apiFetch('/api/upload-avatar', { method: 'POST', body: fd });
+        regAvatarUrl = data.avatarUrl;
+        $('regAvatarPreview').innerHTML = `<img src="${regAvatarUrl}" alt="">`;
+    } catch (err) {
+        showAuthError('registerError', err.message);
+    }
 });
 
 // ── Login ──────────────────────────────────────────────────────
 $('loginBtn').addEventListener('click', async () => {
-    const pseudo   = $('loginPseudo').value.trim();
+    const pseudo   = $('loginLegacyPseudo').value.trim();
+    const countryCode = $('loginCountryCode').value;
+    const phoneNumber = $('loginPhoneNumber').value.trim();
     const password = $('loginPassword').value.trim();
-    if (!pseudo || !password) return showAuthError('loginError', 'Remplissez tous les champs');
+    if ((!phoneNumber && !pseudo) || !password) return showAuthError('loginError', 'Ajoutez un numero ou un pseudo existant');
     $('loginBtn').classList.add('loading');
-    socket.emit('auth', { pseudo, password, isRegister: false }, (res) => {
+    socket.emit('auth', { pseudo, countryCode, phoneNumber, password, isRegister: false }, (res) => {
         $('loginBtn').classList.remove('loading');
         if (res.success) { onAuthSuccess(res); }
         else showAuthError('loginError', res.error);
@@ -71,13 +281,15 @@ $('loginPassword').addEventListener('keypress', e => { if (e.key === 'Enter') $(
 // ── Register ───────────────────────────────────────────────────
 $('registerBtn').addEventListener('click', async () => {
     const pseudo = $('regPseudo').value.trim();
+    const countryCode = $('regCountryCode').value;
+    const phoneNumber = $('regPhoneNumber').value.trim();
     const pw1    = $('regPassword').value;
     const pw2    = $('regPassword2').value;
-    if (!pseudo || !pw1) return showAuthError('registerError', 'Remplissez tous les champs');
+    if (!pseudo || !pw1 || !phoneNumber) return showAuthError('registerError', 'Remplissez tous les champs');
     if (pw1 !== pw2)     return showAuthError('registerError', 'Mots de passe différents');
     if (pw1.length < 4)  return showAuthError('registerError', 'Mot de passe trop court (min 4 caractères)');
     $('registerBtn').classList.add('loading');
-    socket.emit('auth', { pseudo, password: pw1, isRegister: true, avatar: regAvatarUrl }, (res) => {
+    socket.emit('auth', { pseudo, countryCode, phoneNumber, password: pw1, isRegister: true, avatar: regAvatarUrl }, (res) => {
         $('registerBtn').classList.remove('loading');
         if (res.success) { onAuthSuccess(res); }
         else showAuthError('registerError', res.error);
@@ -87,9 +299,11 @@ $('registerBtn').addEventListener('click', async () => {
 // ── Reset ──────────────────────────────────────────────────────
 $('resetBtn').addEventListener('click', () => {
     const pseudo = $('resetPseudo').value.trim();
+    const countryCode = $('resetCountryCode').value;
+    const phoneNumber = $('resetPhoneNumber').value.trim();
     const newPw  = $('resetNewPw').value;
-    if (!pseudo || !newPw) return showAuthError('resetError', 'Remplissez tous les champs');
-    socket.emit('reset-password', { pseudo, newPassword: newPw }, (res) => {
+    if ((!pseudo && !phoneNumber) || !newPw) return showAuthError('resetError', 'Ajoutez un numero ou un pseudo existant');
+    socket.emit('reset-password', { pseudo, countryCode, phoneNumber, newPassword: newPw }, (res) => {
         if (res.success) {
             $('resetError').textContent = '';
             $('resetSuccess').textContent = 'Mot de passe modifié ! Connectez-vous.';
@@ -113,6 +327,9 @@ function onAuthSuccess(res) {
     groups        = res.groups || [];
     allUsers      = res.users || [];
     statuses      = res.statuses || [];
+    updateChannelInfo = res.updateChannel || null;
+    authSessionToken = res.sessionToken || null;
+    seedKnownPrivateChats();
 
     updateSidebarUser();
     setupSocketListeners();
@@ -120,7 +337,11 @@ function onAuthSuccess(res) {
         $('authScreen').style.display = 'none';
         $('mainScreen').style.display = 'flex';
         renderStatusStrip();
+        renderUpdateChannelPrompt();
         renderConversations();
+        if (currentUser.needsPhoneSetup) {
+            showToast('Ajoutez votre numero principal dans le profil pour activer les statuts prives');
+        }
     });
 }
 
@@ -129,6 +350,31 @@ function updateSidebarUser() {
     $('drawerAvatar').src      = currentUser.avatar;
     $('drawerPseudo').textContent = currentUser.pseudo;
 }
+
+function formatPhoneNumber(value) {
+    if (!value) return 'Non renseigné';
+    return value;
+}
+
+function renderUpdateChannelPrompt() {
+    const prompt = $('updateChannelPrompt');
+    if (!updateChannelInfo || updateChannelInfo.joined) {
+        prompt.style.display = 'none';
+        return;
+    }
+    prompt.style.display = 'flex';
+}
+
+$('joinUpdateChannelBtn').addEventListener('click', () => {
+    socket.emit('join-update-channel', (res) => {
+        if (!res?.success) return showToast(res?.error || 'Erreur');
+        if (res.group) upsertGroup(res.group);
+        updateChannelInfo = res.updateChannel || updateChannelInfo;
+        renderUpdateChannelPrompt();
+        renderConversations();
+        showToast('Canal de mises a jour rejoint');
+    });
+});
 
 function playAuthLaunch() {
     const launch = $('authLaunch');
@@ -145,6 +391,27 @@ function upsertConversationMessage(message) {
     const idx = conversations.findIndex(m => m.id === message.id);
     if (idx === -1) conversations.push(message);
     else conversations[idx] = { ...conversations[idx], ...message };
+}
+
+function registerPrivateChat(pseudo, avatar = null) {
+    if (!pseudo || pseudo === currentUser?.pseudo) return;
+    const idx = knownPrivateChats.findIndex(chat => chat.pseudo === pseudo);
+    const next = {
+        pseudo,
+        avatar: avatar || allUsers.find(user => user.pseudo === pseudo)?.avatar || dicebear(pseudo)
+    };
+    if (idx === -1) knownPrivateChats.push(next);
+    else knownPrivateChats[idx] = { ...knownPrivateChats[idx], ...next };
+}
+
+function seedKnownPrivateChats() {
+    knownPrivateChats = [];
+    conversations.forEach(message => {
+        if (message.type !== 'private') return;
+        registerPrivateChat(
+            message.from === currentUser?.pseudo ? message.to : message.from
+        );
+    });
 }
 
 function upsertGroup(group) {
@@ -261,7 +528,7 @@ function renderStatusStrip() {
 }
 
 function updateProfileStatsUI(stats) {
-    if (!stats) return;
+    if (!stats || stats.error) return;
     $('statUsers').textContent = stats.users ?? '-';
     $('statOnlineUsers').textContent = stats.onlineUsers ?? '-';
     $('statGroups').textContent = stats.groups ?? '-';
@@ -270,8 +537,9 @@ function updateProfileStatsUI(stats) {
 }
 
 function requestAppStats() {
-    if (!currentUser) return;
+    if (!currentUser?.isAdmin) return;
     socket.emit('get-app-stats', stats => {
+        if (stats?.error) return;
         appStats = stats;
         updateProfileStatsUI(stats);
     });
@@ -360,6 +628,14 @@ function renderConversations(filter = '') {
         }
     });
 
+    knownPrivateChats.forEach(chat => {
+        const key = 'p_' + chat.pseudo;
+        if (currentUser?.hiddenChats?.[conversationKey('private', chat.pseudo)]) return;
+        if (!chatMap.has(key)) {
+            chatMap.set(key, { type: 'private', id: chat.pseudo, lastMsg: null, unread: 0 });
+        }
+    });
+
     // Sort by last message date
     const sorted = [...chatMap.values()].sort((a, b) => {
         const da = a.lastMsg ? new Date(a.lastMsg.date) : 0;
@@ -427,6 +703,7 @@ function renderConversations(filter = '') {
 //  OPEN CHAT
 // ═══════════════════════════════════════════════════════════════
 function openChat(chat) {
+    if (chat.type === 'private') registerPrivateChat(chat.id, chat.avatar);
     currentChat = chat;
     cancelReply();
 
@@ -476,6 +753,8 @@ function openChat(chat) {
         $('ctxManageGroup').style.display = isAdmin ? 'flex' : 'none';
     }
 
+    refreshChatComposerState();
+
     renderMessages();
     renderConversations();
 
@@ -500,7 +779,7 @@ function openChat(chat) {
         renderConversations();
     }
 
-    $('messageInput').focus();
+    if (!isReadonlyOfficialChannel(chat)) $('messageInput').focus();
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -510,7 +789,10 @@ function renderMessages() {
     const container = $('messagesContainer');
     container.innerHTML = '';
 
-    if (!currentChat) return;
+    if (!currentChat) {
+        clearMessageSelection();
+        return;
+    }
 
     const msgs = getVisibleConversations().filter(m => {
         if (currentChat.type === 'private') {
@@ -557,6 +839,7 @@ function buildMessageEl(msg) {
     const wrap = document.createElement('div');
     wrap.className = `msg-wrap ${isOwn ? 'own' : 'other'}`;
     wrap.dataset.msgId = msg.id;
+    if (selectedMessageIds.has(msg.id)) wrap.classList.add('selected');
 
     // Sender name (groups only, not own)
     if (currentChat?.type === 'group' && !isOwn) {
@@ -586,11 +869,18 @@ function buildMessageEl(msg) {
         bubble.appendChild(document.createTextNode('Message supprimé'));
     } else if (msg.fileUrl) {
         const isImg = /\.(jpg|jpeg|png|gif|webp|svg)$/i.test(msg.fileUrl) || (msg.fileType && msg.fileType.startsWith('image/'));
+        const isAudio = msg.fileType && msg.fileType.startsWith('audio/');
         if (isImg) {
             const img = document.createElement('img');
             img.className = 'msg-img'; img.src = msg.fileUrl; img.alt = 'Image';
             img.addEventListener('click', () => openImageViewer(msg.fileUrl));
             bubble.appendChild(img);
+            if (msg.content) bubble.appendChild(document.createTextNode(msg.content));
+        } else if (isAudio) {
+            const audio = document.createElement('audio');
+            audio.controls = true;
+            audio.src = msg.fileUrl;
+            bubble.appendChild(audio);
             if (msg.content) bubble.appendChild(document.createTextNode(msg.content));
         } else {
             const fileDiv = document.createElement('div');
@@ -609,6 +899,7 @@ function buildMessageEl(msg) {
     meta.className = 'msg-meta';
     if (msg.isSecret) meta.innerHTML += `<i class="fas fa-lock msg-secret-icon"></i>`;
     if (msg.isEphemeral) meta.innerHTML += `<i class="fas fa-hourglass-half msg-secret-icon"></i>`;
+    if (msg.editedAt && !msg.deleted) meta.innerHTML += `<span class="msg-time">modifié</span>`;
     meta.innerHTML += `<span class="msg-time">${formatTime(msg.date)}</span>`;
     if (isOwn && !msg.deleted) {
         const isRead = msg.readBy && msg.readBy.some(r => r !== currentUser.pseudo);
@@ -636,6 +927,11 @@ function buildMessageEl(msg) {
     bubble.addEventListener('contextmenu', (e) => {
         e.preventDefault();
         showMsgContextMenu(e, msg, isOwn);
+    });
+    bubble.addEventListener('click', () => {
+        if (!selectedMessageIds.size) return;
+        if (!isOwn || msg.deleted) return;
+        toggleMessageSelection(msg.id);
     });
     // Long press (mobile)
     let pressTimer;
@@ -675,6 +971,12 @@ function showMsgContextMenu(e, msg, isOwn) {
 
     const items = [
         { icon: 'fa-reply', label: 'Répondre', action: () => setReply(msg) },
+        ...(isOwn && !msg.deleted ? [{ icon: 'fa-check-square', label: 'Sélectionner', action: () => {
+            toggleMessageSelection(msg.id);
+        }}] : []),
+        ...(isOwn && !msg.deleted && !msg.fileUrl ? [{ icon: 'fa-pen', label: 'Modifier', action: () => {
+            promptEditMessage(msg);
+        }}] : []),
         ...(isOwn && !msg.deleted ? [{ icon: 'fa-trash', label: 'Supprimer', danger: true, action: () => {
             socket.emit('delete-message', { messageId: msg.id }, (res) => {
                 if (res.success) {
@@ -724,6 +1026,10 @@ window.cancelReply = cancelReply;
 function sendMessage() {
     const now = Date.now();
     if (now < sendLockUntil) return;
+    if (isReadonlyOfficialChannel()) {
+        showToast('Seul l administrateur peut publier dans ce canal');
+        return;
+    }
 
     const content = $('messageInput').value.trim();
     if (!content && !replyTo) return;
@@ -751,6 +1057,7 @@ function sendMessage() {
     $('messageInput').value = '';
     autoResizeInput();
     cancelReply();
+    updateComposerActionButtons();
 }
 
 $('sendBtn').addEventListener('click', sendMessage);
@@ -760,6 +1067,10 @@ $('messageInput').addEventListener('keydown', (e) => {
         e.preventDefault();
         sendMessage();
     }
+});
+$('messageInput').addEventListener('input', () => {
+    autoResizeInput();
+    updateComposerActionButtons();
 });
 
 $('messageInput').addEventListener('input', () => {
@@ -788,23 +1099,21 @@ $('attachBtn').addEventListener('click', () => $('fileInput').click());
 $('fileInput').addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file || !currentChat) return;
-    showToast('Envoi en cours...');
-    const fd = new FormData(); fd.append('file', file);
-    const r = await fetch('/api/upload', { method: 'POST', body: fd });
-    const d = await r.json();
-    const payload = { content: '', fileUrl: d.fileUrl, fileName: d.fileName, fileType: d.fileType, replyTo: replyTo?.id || null };
-    if (currentChat.type === 'private') {
-        payload.to = currentChat.id;
-        socket.emit('private-message', payload, (res) => {
-            if (!res?.success) showToast(res?.error || 'Erreur d\'envoi');
-        });
-    } else {
-        payload.groupId = currentChat.id;
-        socket.emit('group-message', payload, (res) => {
-            if (!res?.success) showToast(res?.error || 'Erreur d\'envoi');
-        });
+    if (isReadonlyOfficialChannel()) {
+        e.target.value = '';
+        showToast('Seul l administrateur peut publier dans ce canal');
+        return;
     }
-    cancelReply();
+    showToast('Envoi en cours...');
+    let d;
+    try {
+        const fd = new FormData(); fd.append('file', file);
+        d = await apiFetch('/api/upload', { method: 'POST', body: fd });
+    } catch (err) {
+        showToast(err.message);
+        return;
+    }
+    await sendUploadedMessageFile(d);
     $('fileInput').value = '';
     showToast('Fichier envoyé ✓');
 });
@@ -819,18 +1128,22 @@ $('emojiBtn').addEventListener('click', (e) => {
         if (!emojiPickerEl && window.EmojiMart) {
             emojiPickerEl = new window.EmojiMart.Picker({
                 theme: 'dark',
+                dynamicWidth: window.innerWidth <= 768,
                 onEmojiSelect: (emoji) => {
                     $('messageInput').value += emoji.native;
                     container.style.display = 'none';
                     $('messageInput').focus();
+                    updateComposerActionButtons();
                 }
             });
             container.appendChild(emojiPickerEl);
         }
-        // Position near button
         const rect = $('emojiBtn').getBoundingClientRect();
+        const pickerWidth = Math.min(window.innerWidth - 16, 352);
+        const desiredLeft = window.innerWidth <= 768 ? (window.innerWidth - pickerWidth) / 2 : rect.left - 8;
+        const maxLeft = Math.max(8, window.innerWidth - pickerWidth - 8);
         container.style.bottom = (window.innerHeight - rect.top + 8) + 'px';
-        container.style.left   = '16px';
+        container.style.left = `${Math.max(8, Math.min(desiredLeft, maxLeft))}px`;
     } else {
         container.style.display = 'none';
     }
@@ -838,6 +1151,70 @@ $('emojiBtn').addEventListener('click', (e) => {
 document.addEventListener('click', (e) => {
     if (!$('emojiPickerContainer').contains(e.target) && e.target !== $('emojiBtn'))
         $('emojiPickerContainer').style.display = 'none';
+});
+
+$('voiceBtn').addEventListener('click', async () => {
+    if (isReadonlyOfficialChannel()) {
+        showToast('Seul l administrateur peut publier dans ce canal');
+        return;
+    }
+    if (!currentChat) return;
+
+    if (isRecording && mediaRecorder) {
+        mediaRecorder.stop();
+        return;
+    }
+
+    try {
+        mediaRecorderStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const chunks = [];
+        const recorderOptions = MediaRecorder.isTypeSupported?.('audio/webm') ? { mimeType: 'audio/webm' } : undefined;
+        mediaRecorder = recorderOptions ? new MediaRecorder(mediaRecorderStream, recorderOptions) : new MediaRecorder(mediaRecorderStream);
+        isRecording = true;
+        $('voiceBtn').classList.add('recording');
+        $('voiceBtn').innerHTML = '<i class="fas fa-stop"></i>';
+        $('messageInput').placeholder = 'Enregistrement vocal...';
+        updateComposerActionButtons();
+
+        mediaRecorder.addEventListener('dataavailable', (event) => {
+            if (event.data?.size) chunks.push(event.data);
+        });
+
+        mediaRecorder.addEventListener('stop', async () => {
+            isRecording = false;
+            $('voiceBtn').classList.remove('recording');
+            $('voiceBtn').innerHTML = '<i class="fas fa-microphone"></i>';
+            $('messageInput').placeholder = isReadonlyOfficialChannel() ? 'Canal officiel en lecture seule' : 'Message...';
+            stopVoiceStream();
+            const blob = new Blob(chunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+            mediaRecorder = null;
+            updateComposerActionButtons();
+            if (!blob.size) return;
+
+            try {
+                showToast('Envoi de la note vocale...');
+                const file = new File([blob], `note-vocale-${Date.now()}.webm`, { type: blob.type || 'audio/webm' });
+                const fd = new FormData();
+                fd.append('file', file);
+                const uploaded = await apiFetch('/api/upload', { method: 'POST', body: fd });
+                await sendUploadedMessageFile(uploaded);
+                showToast('Note vocale envoyée ✓');
+            } catch (err) {
+                showToast(err.message);
+            }
+        });
+
+        mediaRecorder.start();
+    } catch (err) {
+        isRecording = false;
+        mediaRecorder = null;
+        stopVoiceStream();
+        $('voiceBtn').classList.remove('recording');
+        $('voiceBtn').innerHTML = '<i class="fas fa-microphone"></i>';
+        $('messageInput').placeholder = isReadonlyOfficialChannel() ? 'Canal officiel en lecture seule' : 'Message...';
+        updateComposerActionButtons();
+        showToast('Microphone indisponible');
+    }
 });
 
 // ═══════════════════════════════════════════════════════════════
@@ -867,13 +1244,29 @@ $('sidebarSearch').addEventListener('input', (e) => {
             results.forEach(u => {
                 const div = document.createElement('div');
                 div.className = 'search-result-item';
+                const alreadyInContacts = currentUser?.contacts?.includes(u.phoneNumber);
                 div.innerHTML = `
                     <img src="${u.avatar}" class="ri-avatar" alt="">
                     <div class="ri-info">
                         <div class="ri-name">${escHtml(u.pseudo)}</div>
-                        <div class="ri-sub">${u.online ? '🟢 En ligne' : lastSeenText(u.lastSeen)}</div>
+                        <div class="ri-sub">${escHtml(formatPhoneNumber(u.phoneNumber))}</div>
+                        <div class="ri-sub">${u.online ? 'En ligne' : lastSeenText(u.lastSeen)}</div>
                     </div>
+                    ${u.phoneNumber
+                        ? `<button class="btn-secondary search-add-contact-btn" ${alreadyInContacts ? 'disabled' : ''}>${alreadyInContacts ? 'Ajouté' : 'Ajouter'}</button>`
+                        : ''
+                    }
                 `;
+                const addBtn = div.querySelector('.search-add-contact-btn');
+                if (addBtn && !alreadyInContacts) {
+                    addBtn.addEventListener('click', (event) => {
+                        event.stopPropagation();
+                        addContactByPhone(u.phoneNumber, () => {
+                            addBtn.textContent = 'Ajouté';
+                            addBtn.disabled = true;
+                        });
+                    });
+                }
                 div.addEventListener('click', () => {
                     $('sidebarSearch').value = '';
                     $('searchResultsPanel').style.display = 'none';
@@ -891,6 +1284,34 @@ $('searchClearBtn').addEventListener('click', () => {
     $('searchResultsPanel').style.display = 'none';
     $('conversationsList').style.display  = 'block';
     renderConversations();
+});
+
+$('cancelMessageSelectionBtn').addEventListener('click', () => {
+    clearMessageSelection();
+    renderMessages();
+});
+
+$('deleteSelectedMessagesBtn').addEventListener('click', () => {
+    const messageIds = [...selectedMessageIds];
+    if (!messageIds.length) return;
+    if (!confirm(`Supprimer ${messageIds.length} message(s) ?`)) return;
+    socket.emit('delete-messages', { messageIds }, (res) => {
+        if (!res?.success) return showToast(res?.error || 'Erreur');
+        res.messageIds.forEach(id => {
+            const msg = conversations.find(item => item.id === id);
+            if (msg) {
+                msg.deleted = true;
+                msg.content = '';
+                msg.fileUrl = null;
+                msg.fileName = null;
+                msg.fileType = null;
+            }
+        });
+        clearMessageSelection();
+        renderMessages();
+        renderConversations();
+        showToast('Messages supprimés');
+    });
 });
 
 // ═══════════════════════════════════════════════════════════════
@@ -915,6 +1336,7 @@ function openDrawerSection(section) {
 }
 
 $('logoutBtn').addEventListener('click', () => {
+    authSessionToken = null;
     socket.disconnect();
     location.reload();
 });
@@ -996,18 +1418,20 @@ $('ctxSecretChat').addEventListener('click', () => {
 function closeContextMenu() { $('chatContextMenu').classList.remove('open'); }
 
 $('backBtn').addEventListener('click', () => {
-    if (window.innerWidth <= 768) {
-        $('sidebar').classList.remove('hidden');
-        closeChatArea();
-    }
+    if (!currentChat) return;
+    $('sidebar').classList.remove('hidden');
+    closeChatArea();
 });
 
 function closeChatArea() {
+    if (isRecording && mediaRecorder) mediaRecorder.stop();
     currentChat = null;
+    clearMessageSelection();
     $('chatWelcome').style.display    = 'flex';
     $('chatHeader').style.display     = 'none';
     $('messageInputArea').style.display = 'none';
     $('messagesContainer').innerHTML  = '';
+    $('chatReadonlyNotice').style.display = 'none';
     renderConversations();
 }
 
@@ -1058,6 +1482,21 @@ function removeSelectedMember(pseudo) {
 }
 window.removeSelectedMember = removeSelectedMember;
 
+$('groupAvatarPreview').addEventListener('click', () => $('groupAvatarFile').click());
+$('groupAvatarFile').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    try {
+        const fd = new FormData();
+        fd.append('avatar', file);
+        const data = await apiFetch('/api/upload-avatar', { method: 'POST', body: fd });
+        groupAvatarUrl = data.avatarUrl;
+        $('groupAvatarPreview').innerHTML = `<img src="${groupAvatarUrl}" alt="">`;
+    } catch (err) {
+        showToast(err.message);
+    }
+});
+
 $('createGroupBtn').addEventListener('click', () => {
     const name = $('groupName').value.trim();
     if (!name) return showToast('Nom du groupe requis');
@@ -1065,7 +1504,8 @@ $('createGroupBtn').addEventListener('click', () => {
         name,
         description: $('groupDesc').value.trim(),
         members: selectedMembers.map(m => m.pseudo),
-        isPublic: $('groupPublic').checked
+        isPublic: $('groupPublic').checked,
+        avatar: groupAvatarUrl
     }, (res) => {
         if (res.success) {
             upsertGroup(res.group);
@@ -1075,6 +1515,9 @@ $('createGroupBtn').addEventListener('click', () => {
             $('groupName').value = '';
             $('groupDesc').value = '';
             $('groupPublic').checked = false;
+            groupAvatarUrl = null;
+            $('groupAvatarPreview').innerHTML = '<i class="fas fa-camera"></i>';
+            $('groupAvatarFile').value = '';
             renderSelectedMembers();
         }
     });
@@ -1130,14 +1573,61 @@ window.openGroupFromExplore = openGroupFromExplore;
 
 // ── Profile ────────────────────────────────────────────────────
 $('profileBtn').addEventListener('click', openProfileModal);
+
+function renderContactsList() {
+    const list = $('contactsList');
+    const contacts = currentUser?.contacts || [];
+    list.innerHTML = '';
+
+    if (!contacts.length) {
+        list.innerHTML = '<div class="empty-state" style="height:auto;padding:12px"><small>Aucun contact enregistré pour les statuts.</small></div>';
+        return;
+    }
+
+    contacts.forEach(phone => {
+        const item = document.createElement('div');
+        item.className = 'contact-item';
+        item.innerHTML = `
+            <div>
+                <strong>${escHtml(formatPhoneNumber(phone))}</strong>
+                <div class="status-meta-sub">Contact autorisé pour les statuts</div>
+            </div>
+            <button class="btn-secondary" onclick="removeContact('${phone}')">Retirer</button>
+        `;
+        list.appendChild(item);
+    });
+}
+
+function removeContact(phone) {
+    socket.emit('remove-contact', { phoneNumber: phone }, (res) => {
+        if (!res?.success) return showToast(res?.error || 'Erreur');
+        syncCurrentUser(res.user);
+        renderContactsList();
+        renderStatusStrip();
+        showToast('Contact retiré');
+    });
+}
+window.removeContact = removeContact;
+
 function openProfileModal() {
     $('profileAvatar').src = currentUser.avatar;
     $('profilePseudo').textContent = currentUser.pseudo;
     $('profileBio').value = currentUser.bio || '';
+    $('profileCountryCode').value = currentUser.phoneCountryCode || '+242';
+    $('profilePhoneNumber').value = currentUser.phoneLocalNumber || '';
+    $('profilePhoneHint').textContent = currentUser.phoneNumber
+        ? `Numero actuel: ${formatPhoneNumber(currentUser.phoneNumber)}`
+        : 'Ajoutez votre numero pour activer les statuts prives.';
+    $('contactCountryCode').value = '+242';
+    $('contactPhoneNumber').value = '';
+    $('profileAdminBadge').style.display = currentUser.isAdmin ? 'inline-flex' : 'none';
+    $('profileStatsGrid').style.display = currentUser.isAdmin ? 'grid' : 'none';
+    $('profileStatsNotice').style.display = currentUser.isAdmin ? 'none' : 'block';
     const notificationsEnabled = ('Notification' in window) && Notification.permission === 'granted';
     $('enableNotificationsBtn').textContent = notificationsEnabled
         ? 'Notifications activées'
         : 'Activer les notifications';
+    renderContactsList();
     updateProfileStatsUI(appStats || {});
     requestAppStats();
     openModal('profileModal');
@@ -1146,20 +1636,42 @@ $('changeAvatarBtn').addEventListener('click', () => $('profileAvatarFile').clic
 $('profileAvatarFile').addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    const fd = new FormData(); fd.append('avatar', file);
-    const r = await fetch('/api/upload-avatar', { method: 'POST', body: fd });
-    const d = await r.json();
-    $('profileAvatar').src = d.avatarUrl;
-    currentUser.avatar = d.avatarUrl;
+    try {
+        const fd = new FormData(); fd.append('avatar', file);
+        const data = await apiFetch('/api/upload-avatar', { method: 'POST', body: fd });
+        $('profileAvatar').src = data.avatarUrl;
+        currentUser.avatar = data.avatarUrl;
+    } catch (err) {
+        showToast(err.message);
+    }
 });
 $('saveProfileBtn').addEventListener('click', () => {
-    socket.emit('update-profile', { avatar: currentUser.avatar, bio: $('profileBio').value }, (res) => {
+    socket.emit('update-profile', {
+        avatar: currentUser.avatar,
+        bio: $('profileBio').value,
+        countryCode: $('profileCountryCode').value,
+        phoneNumber: $('profilePhoneNumber').value.trim()
+    }, (res) => {
         if (res.success) {
             currentUser = res.user;
             updateSidebarUser();
             closeModal('profileModal');
             showToast('Profil mis à jour ✓');
-        }
+        } else showToast(res?.error || 'Erreur');
+    });
+});
+
+$('addContactBtn').addEventListener('click', () => {
+    socket.emit('add-contact', {
+        countryCode: $('contactCountryCode').value,
+        phoneNumber: $('contactPhoneNumber').value.trim()
+    }, (res) => {
+        if (!res?.success) return showToast(res?.error || 'Erreur');
+        syncCurrentUser(res.user);
+        $('contactPhoneNumber').value = '';
+        renderContactsList();
+        renderStatusStrip();
+        showToast('Contact ajouté');
     });
 });
 
@@ -1186,6 +1698,10 @@ function openManageGroupModal() {
     if (!currentChat || currentChat.type !== 'group') return;
     const group = groups.find(g => g.id === currentChat.id);
     if (!group) return;
+    manageGroupAvatarUrl = group.avatar;
+    $('manageGroupAvatarPreview').innerHTML = `<img src="${group.avatar}" alt="">`;
+    $('manageGroupName').value = group.name || '';
+    $('manageGroupDesc').value = group.description || '';
     const list = $('manageMembersList');
     list.innerHTML = '';
     group.members.forEach(pseudo => {
@@ -1209,6 +1725,38 @@ function openManageGroupModal() {
     $('addMemberInput').value = '';
     openModal('manageGroupModal');
 }
+$('manageGroupAvatarPreview').addEventListener('click', () => $('manageGroupAvatarFile').click());
+$('manageGroupAvatarFile').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    try {
+        const fd = new FormData();
+        fd.append('avatar', file);
+        const data = await apiFetch('/api/upload-avatar', { method: 'POST', body: fd });
+        manageGroupAvatarUrl = data.avatarUrl;
+        $('manageGroupAvatarPreview').innerHTML = `<img src="${manageGroupAvatarUrl}" alt="">`;
+    } catch (err) {
+        showToast(err.message);
+    }
+});
+$('saveGroupProfileBtn').addEventListener('click', () => {
+    if (!currentChat || currentChat.type !== 'group') return;
+    socket.emit('update-group-profile', {
+        groupId: currentChat.id,
+        name: $('manageGroupName').value.trim(),
+        description: $('manageGroupDesc').value.trim(),
+        avatar: manageGroupAvatarUrl
+    }, (res) => {
+        if (!res?.success) return showToast(res?.error || 'Erreur');
+        upsertGroup(res.group);
+        currentChat.name = res.group.name;
+        currentChat.avatar = res.group.avatar;
+        $('currentChatName').textContent = res.group.name;
+        $('chatAvatar').src = res.group.avatar;
+        renderConversations();
+        showToast('Profil du groupe mis à jour');
+    });
+});
 function banMember(pseudo) {
     if (!confirm(`Bannir ${pseudo} ?`)) return;
     socket.emit('ban-member', { groupId: currentChat.id, pseudo }, (res) => {
@@ -1305,16 +1853,17 @@ function renderMyStatuses() {
     ownStatuses.forEach(status => {
         const div = document.createElement('div');
         div.className = 'my-status-item';
+        const textThumb = `<div class="my-status-thumb status-text-thumb" style="background:${statusBackgroundStyle(status.background)}">${escHtml((status.text || 'Texte').slice(0, 24))}</div>`;
         div.innerHTML = `
             ${status.mediaUrl
                 ? (status.fileType?.startsWith('video/')
                     ? `<video src="${status.mediaUrl}" muted></video>`
                     : `<img src="${status.mediaUrl}" alt="">`)
-                : '<div class="status-avatar-fallback">T</div>'
+                : textThumb
             }
             <div style="flex:1">
                 <div>${escHtml(status.text || 'Statut média')}</div>
-                <div class="status-meta-sub">${formatTime(status.createdAt)} · ${status.viewedByCount || 0} vues</div>
+                <div class="status-meta-sub">${formatTime(status.createdAt)} · ${status.viewedByCount || 0} vues · Contacts mutuels</div>
             </div>
             <button onclick="deleteStatus('${status.id}')"><i class="fas fa-trash"></i></button>
         `;
@@ -1325,7 +1874,9 @@ function renderMyStatuses() {
 function openStatusComposerModal() {
     $('statusTextInput').value = '';
     statusUpload = null;
-    $('statusComposerPreview').innerHTML = 'Ajoutez un texte, une image ou une vidéo';
+    selectedStatusTheme = STATUS_THEMES[0].key;
+    renderStatusThemePicker();
+    updateStatusComposerPreview();
     renderMyStatuses();
     openModal('statusComposerModal');
 }
@@ -1349,10 +1900,13 @@ function renderActiveStatus() {
     $('statusViewerMeta').innerHTML = `
         <div class="status-meta-title">${escHtml(status.userPseudo)}</div>
         <div class="status-meta-sub">Publié le ${new Date(status.createdAt).toLocaleString('fr-FR', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}</div>
+        <div class="status-meta-sub">Audience: contacts mutuels</div>
+        ${status.seenBy?.length ? `<div class="status-meta-sub">Vu par: ${status.seenBy.map(user => escHtml(user.pseudo)).join(', ')}</div>` : ''}
     `;
 
     const content = $('statusViewerContent');
     if (status.mediaUrl) {
+        content.classList.remove('status-text-card');
         content.innerHTML = status.fileType?.startsWith('video/')
             ? `<video src="${status.mediaUrl}" controls autoplay></video>`
             : `<img src="${status.mediaUrl}" alt="">`;
@@ -1364,8 +1918,11 @@ function renderActiveStatus() {
             content.appendChild(text);
         }
     } else {
+        content.classList.add('status-text-card');
+        content.style.background = statusBackgroundStyle(status.background);
         content.innerHTML = `<div class="status-viewer-text">${escHtml(status.text || 'Statut')}</div>`;
     }
+    if (status.mediaUrl) content.style.background = '';
 
     socket.emit('view-status', { statusId: status.id }, (res) => {
         if (res?.success && res.status) {
@@ -1390,17 +1947,29 @@ function deleteStatus(statusId) {
 window.deleteStatus = deleteStatus;
 
 $('pickStatusMediaBtn').addEventListener('click', () => $('statusMediaInput').click());
+$('statusThemePicker').addEventListener('click', (e) => {
+    const button = e.target.closest('[data-theme]');
+    if (!button) return;
+    selectedStatusTheme = button.dataset.theme;
+    renderStatusThemePicker();
+    updateStatusComposerPreview();
+});
+$('statusTextInput').addEventListener('input', updateStatusComposerPreview);
 $('statusMediaInput').addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    const fd = new FormData();
-    fd.append('file', file);
-    const res = await fetch('/api/upload', { method: 'POST', body: fd });
-    const data = await res.json();
-    statusUpload = data;
-    $('statusComposerPreview').innerHTML = data.fileType?.startsWith('video/')
-        ? `<video src="${data.fileUrl}" controls muted></video>`
-        : `<img src="${data.fileUrl}" alt="">`;
+    try {
+        const fd = new FormData();
+        fd.append('file', file);
+        const data = await apiFetch('/api/upload', { method: 'POST', body: fd });
+        statusUpload = data;
+        $('statusComposerPreview').classList.remove('status-text-preview');
+        $('statusComposerPreview').innerHTML = data.fileType?.startsWith('video/')
+            ? `<video src="${data.fileUrl}" controls muted></video>`
+            : `<img src="${data.fileUrl}" alt="">`;
+    } catch (err) {
+        showToast(err.message);
+    }
 });
 
 $('publishStatusBtn').addEventListener('click', () => {
@@ -1409,7 +1978,8 @@ $('publishStatusBtn').addEventListener('click', () => {
         text,
         mediaUrl: statusUpload?.fileUrl || null,
         fileType: statusUpload?.fileType || null,
-        fileName: statusUpload?.fileName || null
+        fileName: statusUpload?.fileName || null,
+        background: selectedStatusTheme
     }, (res) => {
         if (!res?.success) return showToast(res?.error || 'Erreur');
         upsertStatus(res.status);
@@ -1417,7 +1987,9 @@ $('publishStatusBtn').addEventListener('click', () => {
         renderStatusStrip();
         $('statusTextInput').value = '';
         statusUpload = null;
-        $('statusComposerPreview').innerHTML = 'Ajoutez un texte, une image ou une vidéo';
+        selectedStatusTheme = STATUS_THEMES[0].key;
+        renderStatusThemePicker();
+        updateStatusComposerPreview();
         $('statusMediaInput').value = '';
         showToast('Statut publié');
     });
@@ -1443,7 +2015,12 @@ function setupSocketListeners() {
     socketListenersInitialized = true;
 
     socket.on('new-message', (msg) => {
-        if (!msg.isSecret) upsertConversationMessage(msg);
+        upsertConversationMessage(msg);
+        if (msg.type === 'private') {
+            registerPrivateChat(
+                msg.from === currentUser?.pseudo ? msg.to : msg.from
+            );
+        }
         if (msg.from !== currentUser?.pseudo) notifyIncomingMessage(msg);
         if (currentChat) {
             const relevant = (msg.type === 'private' && currentChat.type === 'private' &&
@@ -1482,10 +2059,22 @@ function setupSocketListeners() {
     socket.on('message-deleted', ({ messageId }) => {
         const msg = conversations.find(m => m.id === messageId);
         if (msg) { msg.deleted = true; msg.content = ''; msg.fileUrl = null; }
+        selectedMessageIds.delete(messageId);
+        updateMessageSelectionUI();
         if (currentChat) {
             const el = document.querySelector(`[data-msg-id="${messageId}"]`);
             if (el && msg) el.replaceWith(buildMessageEl(msg));
         }
+    });
+
+    socket.on('message-edited', ({ message }) => {
+        const msg = conversations.find(m => m.id === message?.id);
+        if (msg && message) Object.assign(msg, message);
+        if (currentChat && message) {
+            const el = document.querySelector(`[data-msg-id="${message.id}"]`);
+            if (el) el.replaceWith(buildMessageEl(message));
+        }
+        renderConversations();
     });
 
     socket.on('messages-read', ({ messageIds, by }) => {
@@ -1496,25 +2085,48 @@ function setupSocketListeners() {
 
     socket.on('group-created', (group) => {
         upsertGroup(group);
+        if (group.isUpdatesChannel) {
+            updateChannelInfo = { ...(updateChannelInfo || {}), ...group, joined: true };
+            renderUpdateChannelPrompt();
+        }
         renderConversations();
     });
 
     socket.on('group-updated', (group) => {
         upsertGroup(group);
+        if (group.isUpdatesChannel) {
+            updateChannelInfo = {
+                id: group.id,
+                name: group.name,
+                description: group.description,
+                avatar: group.avatar,
+                joined: group.members.includes(currentUser?.pseudo)
+            };
+            renderUpdateChannelPrompt();
+        }
         if (currentChat?.id === group.id) {
             $('currentChatStatus').textContent = `${group.members.length} membres`;
+            refreshChatComposerState();
         }
         renderConversations();
     });
 
     socket.on('group-left', ({ groupId }) => {
         groups = groups.filter(g => g.id !== groupId);
+        if (updateChannelInfo?.id === groupId) {
+            updateChannelInfo = { ...updateChannelInfo, joined: false };
+            renderUpdateChannelPrompt();
+        }
         if (currentChat?.id === groupId) closeChatArea();
         renderConversations();
     });
 
     socket.on('you-were-banned', ({ groupId, groupName }) => {
         groups = groups.filter(g => g.id !== groupId);
+        if (updateChannelInfo?.id === groupId) {
+            updateChannelInfo = { ...updateChannelInfo, joined: false };
+            renderUpdateChannelPrompt();
+        }
         if (currentChat?.id === groupId) closeChatArea();
         renderConversations();
         showToast(`Vous avez été banni de "${groupName}"`);
@@ -1522,6 +2134,10 @@ function setupSocketListeners() {
 
     socket.on('users-list', (users) => {
         allUsers = users;
+        knownPrivateChats = knownPrivateChats.map(chat => ({
+            ...chat,
+            avatar: users.find(user => user.pseudo === chat.pseudo)?.avatar || chat.avatar
+        }));
         renderStatusStrip();
         renderConversations();
         if (currentChat?.type === 'private') {

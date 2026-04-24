@@ -4,26 +4,98 @@ const socketIo = require('socket.io');
 const path = require('path');
 const multer = require('multer');
 const fs = require('fs');
+const crypto = require('crypto');
 const { v4: uuidv4 } = require('uuid');
 const bcrypt = require('bcrypt');
+const { MongoClient } = require('mongodb');
+const socketCorsOrigin = process.env.CORS_ORIGIN
+    ? process.env.CORS_ORIGIN.split(',').map(origin => origin.trim()).filter(Boolean)
+    : undefined;
 
 const app = express();
 const server = http.createServer(app);
 const io = socketIo(server, {
-    cors: { origin: '*' },
+    cors: socketCorsOrigin ? { origin: socketCorsOrigin } : undefined,
     transports: ['websocket', 'polling']
 });
 
-const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, 'data.json');
-const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(__dirname, 'public', 'uploads');
-const AVATARS_DIR = process.env.AVATARS_DIR || path.join(__dirname, 'public', 'avatars');
+const RENDER_STORAGE_ROOT = '/opt/render/project/src/storage';
+const LOCAL_DATA_FILE = path.join(__dirname, 'data.json');
+const LOCAL_UPLOADS_DIR = path.join(__dirname, 'public', 'uploads');
+const LOCAL_AVATARS_DIR = path.join(__dirname, 'public', 'avatars');
+const DEFAULT_STORAGE_ROOT = fs.existsSync(RENDER_STORAGE_ROOT) ? RENDER_STORAGE_ROOT : null;
+const DATA_FILE = process.env.DATA_FILE || (DEFAULT_STORAGE_ROOT ? path.join(DEFAULT_STORAGE_ROOT, 'data.json') : LOCAL_DATA_FILE);
+const UPLOADS_DIR = process.env.UPLOADS_DIR || (DEFAULT_STORAGE_ROOT ? path.join(DEFAULT_STORAGE_ROOT, 'uploads') : LOCAL_UPLOADS_DIR);
+const AVATARS_DIR = process.env.AVATARS_DIR || (DEFAULT_STORAGE_ROOT ? path.join(DEFAULT_STORAGE_ROOT, 'avatars') : LOCAL_AVATARS_DIR);
 const STATUS_TTL_MS = 24 * 60 * 60 * 1000;
+const UPDATE_CHANNEL_KEY = 'system:updates';
+const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const MONGODB_URI = String(process.env.MONGODB_URI || '').trim();
+const MONGODB_DB_NAME = String(process.env.MONGODB_DB_NAME || 'devchat').trim();
+const MONGODB_COLLECTION = String(process.env.MONGODB_COLLECTION || 'app_state').trim();
+const APP_STATE_DOC_ID = 'main';
+const ALLOW_INSECURE_PASSWORD_RESET = process.env.ALLOW_INSECURE_PASSWORD_RESET === 'true';
+const ALLOWED_UPLOAD_MIME_PREFIXES = ['image/', 'video/', 'audio/'];
+const ALLOWED_UPLOAD_MIME_TYPES = new Set([
+    'application/pdf',
+    'application/zip',
+    'application/x-zip-compressed',
+    'application/json',
+    'text/plain'
+]);
+
+let mongoClient = null;
+let mongoCollection = null;
+let persistChain = Promise.resolve();
+
+function normalizeCountryCode(value) {
+    const digits = String(value || '').replace(/\D/g, '');
+    return digits ? `+${digits}` : '';
+}
+
+function normalizePhoneLocal(value) {
+    return String(value || '').replace(/\D/g, '');
+}
+
+function normalizePhone(countryCode, phoneNumber) {
+    const raw = String(phoneNumber || '').trim();
+    if (raw.startsWith('+')) return normalizeStandalonePhone(raw);
+    const code = normalizeCountryCode(countryCode);
+    const local = normalizePhoneLocal(raw);
+    if (!code || !local) return '';
+    return `${code}${local}`;
+}
+
+function normalizeStandalonePhone(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    if (raw.startsWith('+')) return `+${raw.slice(1).replace(/\D/g, '')}`;
+    return '';
+}
+
+function defaultData() {
+    return { users: [], messages: [], groups: [], statuses: [] };
+}
+
+function ensureStorageBootstrap() {
+    fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
+    fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+    fs.mkdirSync(AVATARS_DIR, { recursive: true });
+
+    if (fs.existsSync(DATA_FILE)) return;
+
+    const initialData = fs.existsSync(LOCAL_DATA_FILE)
+        ? fs.readFileSync(LOCAL_DATA_FILE, 'utf8')
+        : JSON.stringify(defaultData(), null, 2);
+
+    fs.writeFileSync(DATA_FILE, initialData);
+}
 
 function loadData() {
     if (fs.existsSync(DATA_FILE)) {
         try { return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); } catch (e) {}
     }
-    return { users: [], messages: [], groups: [], statuses: [] };
+    return defaultData();
 }
 
 let persistentUsers = {};
@@ -31,6 +103,7 @@ let messages = [];
 let groups = [];
 let statuses = [];
 let socketUsers = {};
+let authSessions = new Map();
 
 function ensureUserDefaults(user) {
     user.bio = user.bio || '';
@@ -38,21 +111,198 @@ function ensureUserDefaults(user) {
     user.blockedUsers = Array.isArray(user.blockedUsers) ? user.blockedUsers : [];
     user.hiddenChats = user.hiddenChats && typeof user.hiddenChats === 'object' ? user.hiddenChats : {};
     user.ephemeralSettings = user.ephemeralSettings && typeof user.ephemeralSettings === 'object' ? user.ephemeralSettings : {};
+    user.phoneCountryCode = normalizeCountryCode(user.phoneCountryCode || '');
+    user.phoneLocalNumber = normalizePhoneLocal(user.phoneLocalNumber || '');
+    user.phoneNumber = normalizeStandalonePhone(user.phoneNumber) || normalizePhone(user.phoneCountryCode, user.phoneLocalNumber);
+    if (!user.phoneCountryCode && user.phoneNumber.startsWith('+242')) user.phoneCountryCode = '+242';
+    if (!user.phoneLocalNumber && user.phoneCountryCode && user.phoneNumber.startsWith(user.phoneCountryCode)) {
+        user.phoneLocalNumber = normalizePhoneLocal(user.phoneNumber.slice(user.phoneCountryCode.length));
+    }
+    user.contacts = [...new Set((Array.isArray(user.contacts) ? user.contacts : []).map(contact => normalizeStandalonePhone(contact)).filter(Boolean))];
+    user.isAdmin = !!user.isAdmin;
     return user;
+}
+
+function ensureGroupDefaults(group) {
+    group.description = group.description || '';
+    group.members = Array.isArray(group.members) ? group.members : [];
+    group.admins = Array.isArray(group.admins) ? group.admins : [];
+    group.banned = Array.isArray(group.banned) ? group.banned : [];
+    group.isPublic = !!group.isPublic;
+    group.isUpdatesChannel = !!group.isUpdatesChannel;
+    group.joinByPrompt = !!group.joinByPrompt;
+    group.systemKey = group.systemKey || null;
+    group.avatar = group.avatar || `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(group.name || 'Group')}&backgroundColor=2aabee`;
+    return group;
+}
+
+function getUserPhone(user) {
+    return user?.phoneNumber || '';
+}
+
+function findUserByPhone(phoneNumber) {
+    const normalized = normalizeStandalonePhone(phoneNumber);
+    return Object.values(persistentUsers).find(user => getUserPhone(user) === normalized) || null;
+}
+
+function areMutualContacts(userPseudoA, userPseudoB) {
+    const userA = persistentUsers[userPseudoA];
+    const userB = persistentUsers[userPseudoB];
+    const phoneA = getUserPhone(userA);
+    const phoneB = getUserPhone(userB);
+
+    if (!userA || !userB || !phoneA || !phoneB) return false;
+    return userA.contacts.includes(phoneB) && userB.contacts.includes(phoneA);
+}
+
+function canViewerSeeStatus(ownerPseudo, viewerPseudo) {
+    if (!ownerPseudo || !viewerPseudo) return false;
+    if (ownerPseudo === viewerPseudo) return true;
+    return areMutualContacts(ownerPseudo, viewerPseudo);
+}
+
+function getUpdatesChannel() {
+    return groups.find(group => group.systemKey === UPDATE_CHANNEL_KEY) || null;
+}
+
+function safeUpdateChannel(userPseudo) {
+    const channel = getUpdatesChannel();
+    if (!channel) return null;
+    return {
+        id: channel.id,
+        name: channel.name,
+        description: channel.description,
+        avatar: channel.avatar,
+        joined: channel.members.includes(userPseudo)
+    };
 }
 
 function isExpired(iso) {
     return !!iso && new Date(iso).getTime() <= Date.now();
 }
 
-function saveData() {
-    const data = {
+function currentDataSnapshot() {
+    return {
         users: Object.values(persistentUsers).map(ensureUserDefaults),
         messages,
-        groups,
+        groups: groups.map(ensureGroupDefaults),
         statuses
     };
-    fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+}
+
+function writeLocalSnapshot(snapshot) {
+    fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
+    fs.writeFileSync(DATA_FILE, JSON.stringify(snapshot, null, 2));
+}
+
+async function connectMongo() {
+    if (!MONGODB_URI) return false;
+    mongoClient = new MongoClient(MONGODB_URI, { ignoreUndefined: true });
+    await mongoClient.connect();
+    mongoCollection = mongoClient.db(MONGODB_DB_NAME).collection(MONGODB_COLLECTION);
+    return true;
+}
+
+async function loadInitialData() {
+    if (mongoCollection) {
+        const doc = await mongoCollection.findOne({ _id: APP_STATE_DOC_ID });
+        if (doc?.state) return doc.state;
+        if (fs.existsSync(DATA_FILE)) {
+            try { return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); } catch (e) {}
+        }
+        if (LOCAL_DATA_FILE !== DATA_FILE && fs.existsSync(LOCAL_DATA_FILE)) {
+            try { return JSON.parse(fs.readFileSync(LOCAL_DATA_FILE, 'utf8')); } catch (e) {}
+        }
+        return defaultData();
+    }
+
+    ensureStorageBootstrap();
+    return loadData();
+}
+
+function saveData() {
+    const snapshot = currentDataSnapshot();
+    if (!mongoCollection) {
+        writeLocalSnapshot(snapshot);
+        return;
+    }
+
+    persistChain = persistChain
+        .catch(() => {})
+        .then(async () => {
+            await mongoCollection.updateOne(
+                { _id: APP_STATE_DOC_ID },
+                {
+                    $set: {
+                        state: snapshot,
+                        updatedAt: new Date().toISOString()
+                    }
+                },
+                { upsert: true }
+            );
+        })
+        .catch(err => {
+            console.error('Mongo persist failed:', err.message);
+        });
+}
+
+function issueSessionToken(pseudo) {
+    const token = crypto.randomBytes(24).toString('hex');
+    authSessions.set(token, {
+        pseudo,
+        expiresAt: Date.now() + SESSION_TTL_MS
+    });
+    return token;
+}
+
+function cleanupExpiredSessions() {
+    const now = Date.now();
+    for (const [token, session] of authSessions.entries()) {
+        if (!session || session.expiresAt <= now) authSessions.delete(token);
+    }
+}
+
+function getSessionPseudoFromRequest(req) {
+    cleanupExpiredSessions();
+    const header = req.headers.authorization || req.headers['x-session-token'] || '';
+    const token = String(header).startsWith('Bearer ') ? String(header).slice(7).trim() : String(header).trim();
+    if (!token) return null;
+    const session = authSessions.get(token);
+    if (!session) return null;
+    if (session.expiresAt <= Date.now()) {
+        authSessions.delete(token);
+        return null;
+    }
+    session.expiresAt = Date.now() + SESSION_TTL_MS;
+    return session.pseudo;
+}
+
+function requireUploadAuth(req, res, next) {
+    const pseudo = getSessionPseudoFromRequest(req);
+    if (!pseudo || !persistentUsers[pseudo]) {
+        return res.status(401).json({ error: 'Authentification requise' });
+    }
+    req.authPseudo = pseudo;
+    next();
+}
+
+function isAllowedUploadMime(file) {
+    const mime = String(file?.mimetype || '').toLowerCase();
+    return ALLOWED_UPLOAD_MIME_PREFIXES.some(prefix => mime.startsWith(prefix)) || ALLOWED_UPLOAD_MIME_TYPES.has(mime);
+}
+
+function uploadFileFilter(req, file, cb) {
+    if (!isAllowedUploadMime(file)) {
+        return cb(new Error('Type de fichier non autorise'));
+    }
+    cb(null, true);
+}
+
+function avatarFileFilter(req, file, cb) {
+    if (!String(file?.mimetype || '').toLowerCase().startsWith('image/')) {
+        return cb(new Error('Image requise'));
+    }
+    cb(null, true);
 }
 
 function conversationKeyForMessage(msg, userPseudo) {
@@ -85,6 +335,7 @@ function messageVisibleForUser(msg, userPseudo) {
 function activeStatusesForViewer(viewerPseudo) {
     return statuses
         .filter(status => !isExpired(status.expiresAt))
+        .filter(status => canViewerSeeStatus(status.userPseudo, viewerPseudo))
         .map(status => safeStatus(status, viewerPseudo));
 }
 
@@ -123,6 +374,12 @@ function safeUser(user) {
 function selfUserPayload(user) {
     return {
         ...safeUser(user),
+        phoneCountryCode: user.phoneCountryCode || '',
+        phoneLocalNumber: user.phoneLocalNumber || '',
+        phoneNumber: getUserPhone(user),
+        contacts: user.contacts || [],
+        isAdmin: !!user.isAdmin,
+        needsPhoneSetup: !getUserPhone(user),
         blockedUsers: user.blockedUsers || [],
         hiddenChats: user.hiddenChats || {},
         ephemeralSettings: user.ephemeralSettings || {}
@@ -130,6 +387,7 @@ function selfUserPayload(user) {
 }
 
 function safeStatus(status, viewerPseudo) {
+    const viewers = (status.viewedBy || []).filter(pseudo => pseudo !== status.userPseudo);
     return {
         id: status.id,
         userPseudo: status.userPseudo,
@@ -138,10 +396,13 @@ function safeStatus(status, viewerPseudo) {
         mediaUrl: status.mediaUrl || null,
         fileType: status.fileType || null,
         fileName: status.fileName || null,
+        background: status.background || null,
         createdAt: status.createdAt,
         expiresAt: status.expiresAt,
+        audience: 'mutual-contacts',
         viewed: !!viewerPseudo && status.viewedBy?.includes(viewerPseudo),
-        viewedByCount: status.viewedBy?.length || 0
+        viewedByCount: viewers.length,
+        seenBy: viewerPseudo === status.userPseudo ? viewers.map(pseudo => safeUser(persistentUsers[pseudo])).filter(Boolean) : []
     };
 }
 
@@ -189,6 +450,7 @@ function appStats() {
 function finalizeAuth(socket, user, callback) {
     cleanupExpiredMessages();
     cleanupExpiredStatuses();
+    cleanupExpiredSessions();
 
     socketUsers[socket.id] = user.pseudo;
     socket.pseudo = user.pseudo;
@@ -203,20 +465,84 @@ function finalizeAuth(socket, user, callback) {
         messages: userMessages,
         groups: userGroups,
         users: Object.values(persistentUsers).map(safeUser),
-        statuses: activeStatusesForViewer(userPseudo)
+        statuses: activeStatusesForViewer(userPseudo),
+        updateChannel: safeUpdateChannel(userPseudo),
+        sessionToken: issueSessionToken(userPseudo)
     });
 
     broadcastUsers();
     io.emit('system', { text: `${userPseudo} a rejoint DevChat` });
 }
 
-const loaded = loadData();
-loaded.users.forEach(user => {
-    persistentUsers[user.pseudo] = ensureUserDefaults(user);
-});
-messages = (loaded.messages || []).filter(msg => !isExpired(msg.expiresAt));
-groups = loaded.groups || [];
-statuses = (loaded.statuses || []).filter(status => !isExpired(status.expiresAt));
+function ensureAdminAccount() {
+    const existingAdmin = Object.values(persistentUsers).find(user => user.isAdmin);
+    if (existingAdmin) return;
+
+    const adminPseudo = (process.env.ADMIN_PSEUDO || 'Admin DevChat').trim();
+    const adminPassword = process.env.ADMIN_PASSWORD || crypto.randomBytes(12).toString('hex');
+    const envPhone = normalizeStandalonePhone(process.env.ADMIN_PHONE);
+    const adminCountryCode = normalizeCountryCode(process.env.ADMIN_COUNTRY_CODE || '+242');
+    const adminLocalNumber = normalizePhoneLocal(process.env.ADMIN_PHONE_LOCAL || '0000000000');
+    const adminPhone = envPhone || normalizePhone(adminCountryCode, adminLocalNumber);
+
+    const existingByPhone = findUserByPhone(adminPhone);
+    if (existingByPhone) {
+        existingByPhone.isAdmin = true;
+        ensureUserDefaults(existingByPhone);
+        return;
+    }
+
+    const existingByPseudo = persistentUsers[adminPseudo];
+    if (existingByPseudo) {
+        existingByPseudo.isAdmin = true;
+        existingByPseudo.phoneCountryCode = existingByPseudo.phoneCountryCode || adminCountryCode;
+        existingByPseudo.phoneLocalNumber = existingByPseudo.phoneLocalNumber || adminLocalNumber;
+        existingByPseudo.phoneNumber = existingByPseudo.phoneNumber || adminPhone;
+        ensureUserDefaults(existingByPseudo);
+        return;
+    }
+
+    persistentUsers[adminPseudo] = ensureUserDefaults({
+        pseudo: adminPseudo,
+        password: bcrypt.hashSync(adminPassword, 10),
+        avatar: `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(adminPseudo)}&backgroundColor=2aabee&fontFamily=Helvetica`,
+        bio: 'Compte administrateur',
+        createdAt: new Date().toISOString(),
+        online: false,
+        lastSeen: new Date().toISOString(),
+        isAdmin: true,
+        phoneCountryCode: adminCountryCode,
+        phoneLocalNumber: adminLocalNumber,
+        phoneNumber: adminPhone,
+        contacts: []
+    });
+
+    if (!process.env.ADMIN_PASSWORD) {
+        console.warn(`Admin password generated for "${adminPseudo}": ${adminPassword}`);
+    }
+}
+
+function ensureUpdatesChannel() {
+    if (getUpdatesChannel()) return;
+    const admin = Object.values(persistentUsers).find(user => user.isAdmin);
+    if (!admin) return;
+
+    groups.push(ensureGroupDefaults({
+        id: uuidv4(),
+        name: 'Mises a jour DevChat',
+        description: "Rejoignez ce canal pour recevoir les annonces et nouvelles fonctionnalites de l'application.",
+        members: [admin.pseudo],
+        admins: [admin.pseudo],
+        banned: [],
+        creator: admin.pseudo,
+        isPublic: false,
+        isUpdatesChannel: true,
+        joinByPrompt: true,
+        systemKey: UPDATE_CHANNEL_KEY,
+        avatar: `https://api.dicebear.com/7.x/shapes/svg?seed=${encodeURIComponent('updates-devchat')}&backgroundColor=2aabee`,
+        createdAt: new Date().toISOString()
+    }));
+}
 
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
@@ -227,7 +553,11 @@ const storage = multer.diskStorage({
         cb(null, `${Date.now()}-${uuidv4().slice(0, 8)}${path.extname(file.originalname)}`);
     }
 });
-const upload = multer({ storage, limits: { fileSize: 50 * 1024 * 1024 } });
+const upload = multer({
+    storage,
+    limits: { fileSize: 50 * 1024 * 1024 },
+    fileFilter: uploadFileFilter
+});
 
 const avatarStorage = multer.diskStorage({
     destination: (req, file, cb) => {
@@ -238,81 +568,170 @@ const avatarStorage = multer.diskStorage({
         cb(null, `avatar-${uuidv4().slice(0, 8)}${path.extname(file.originalname)}`);
     }
 });
-const avatarUpload = multer({ storage: avatarStorage, limits: { fileSize: 5 * 1024 * 1024 } });
+const avatarUpload = multer({
+    storage: avatarStorage,
+    limits: { fileSize: 5 * 1024 * 1024 },
+    fileFilter: avatarFileFilter
+});
 
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/uploads', express.static(UPLOADS_DIR));
 app.use('/avatars', express.static(AVATARS_DIR));
 app.use(express.json());
 
-app.post('/api/upload', upload.single('file'), (req, res) => {
-    if (!req.file) return res.status(400).json({ error: 'Aucun fichier' });
-    res.json({
-        fileUrl: `/uploads/${req.file.filename}`,
-        fileName: req.file.originalname,
-        fileType: req.file.mimetype
+app.post('/api/upload', requireUploadAuth, (req, res) => {
+    upload.single('file')(req, res, err => {
+        if (err) return res.status(400).json({ error: err.message || 'Upload impossible' });
+        if (!req.file) return res.status(400).json({ error: 'Aucun fichier' });
+        res.json({
+            fileUrl: `/uploads/${req.file.filename}`,
+            fileName: req.file.originalname,
+            fileType: req.file.mimetype
+        });
     });
 });
 
-app.post('/api/upload-avatar', avatarUpload.single('avatar'), (req, res) => {
-    if (!req.file) return res.status(400).json({ error: 'Aucun fichier' });
-    res.json({ avatarUrl: `/avatars/${req.file.filename}` });
+app.post('/api/upload-avatar', (req, res) => {
+    avatarUpload.single('avatar')(req, res, err => {
+        if (err) return res.status(400).json({ error: err.message || 'Upload impossible' });
+        if (!req.file) return res.status(400).json({ error: 'Aucun fichier' });
+        res.json({ avatarUrl: `/avatars/${req.file.filename}` });
+    });
 });
 
 io.on('connection', (socket) => {
     console.log('🔌 Connexion:', socket.id);
 
-    socket.on('auth', async ({ pseudo, password, isRegister, avatar }, callback) => {
+    socket.on('auth', async ({ pseudo, password, isRegister, avatar, countryCode, phoneNumber }, callback) => {
         try {
-            const existing = persistentUsers[pseudo];
+            const normalizedPseudo = String(pseudo || '').trim();
+            const normalizedPhone = normalizePhone(countryCode, phoneNumber);
+            const normalizedPassword = String(password || '');
+            const existing = normalizedPhone ? findUserByPhone(normalizedPhone) : persistentUsers[normalizedPseudo];
 
             if (isRegister) {
-                if (existing) return callback({ success: false, error: 'Ce pseudo est déjà pris' });
-                const hash = await bcrypt.hash(password, 10);
+                if (!normalizedPseudo) return callback({ success: false, error: 'Pseudo requis' });
+                if (!normalizedPhone) return callback({ success: false, error: 'Numero de telephone requis' });
+                if (normalizedPassword.length < 4) return callback({ success: false, error: 'Mot de passe trop court' });
+                if (persistentUsers[normalizedPseudo]) return callback({ success: false, error: 'Ce pseudo est deja pris' });
+                if (findUserByPhone(normalizedPhone)) return callback({ success: false, error: 'Ce numero est deja utilise' });
+                const hash = await bcrypt.hash(normalizedPassword, 10);
                 const newUser = ensureUserDefaults({
-                    pseudo,
+                    pseudo: normalizedPseudo,
                     password: hash,
-                    avatar: avatar || `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(pseudo)}&backgroundColor=2aabee&fontFamily=Helvetica`,
+                    avatar: avatar || `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(normalizedPseudo)}&backgroundColor=2aabee&fontFamily=Helvetica`,
                     bio: '',
                     createdAt: new Date().toISOString(),
                     online: true,
-                    lastSeen: new Date().toISOString()
+                    lastSeen: new Date().toISOString(),
+                    phoneCountryCode: normalizeCountryCode(countryCode),
+                    phoneLocalNumber: normalizePhoneLocal(phoneNumber),
+                    phoneNumber: normalizedPhone,
+                    contacts: []
                 });
-                persistentUsers[pseudo] = newUser;
+                persistentUsers[normalizedPseudo] = newUser;
                 saveData();
                 finalizeAuth(socket, newUser, callback);
             } else {
-                if (!existing) return callback({ success: false, error: 'Utilisateur introuvable' });
-                const valid = await bcrypt.compare(password, existing.password);
+                const legacyUser = !existing && normalizedPseudo ? persistentUsers[normalizedPseudo] : null;
+                const authUser = existing || legacyUser;
+                if (!authUser) return callback({ success: false, error: 'Utilisateur introuvable' });
+                const valid = await bcrypt.compare(normalizedPassword, authUser.password);
                 if (!valid) return callback({ success: false, error: 'Mot de passe incorrect' });
-                ensureUserDefaults(existing);
-                existing.online = true;
-                existing.lastSeen = new Date().toISOString();
+                ensureUserDefaults(authUser);
+                authUser.online = true;
+                authUser.lastSeen = new Date().toISOString();
                 saveData();
-                finalizeAuth(socket, existing, callback);
+                finalizeAuth(socket, authUser, callback);
             }
         } catch (err) {
             callback({ success: false, error: err.message });
         }
     });
 
-    socket.on('reset-password', async ({ pseudo, newPassword }, callback) => {
-        const user = persistentUsers[pseudo];
-        if (!user) return callback({ success: false, error: 'Utilisateur introuvable' });
-        user.password = await bcrypt.hash(newPassword, 10);
+    socket.on('reset-password', async ({ pseudo, countryCode, phoneNumber, oldPassword, newPassword }, callback) => {
+        const sessionPseudo = socketUsers[socket.id];
+        const normalizedNewPassword = String(newPassword || '');
+        if (normalizedNewPassword.length < 4) {
+            return callback?.({ success: false, error: 'Mot de passe trop court' });
+        }
+
+        if (sessionPseudo) {
+            const user = persistentUsers[sessionPseudo];
+            if (!user) return callback?.({ success: false, error: 'Session invalide' });
+            const valid = await bcrypt.compare(String(oldPassword || ''), user.password);
+            if (!valid) return callback?.({ success: false, error: 'Mot de passe actuel incorrect' });
+            user.password = await bcrypt.hash(normalizedNewPassword, 10);
+            saveData();
+            return callback?.({ success: true });
+        }
+
+        if (!ALLOW_INSECURE_PASSWORD_RESET) {
+            return callback?.({
+                success: false,
+                error: 'Réinitialisation désactivée pour sécurité. Connectez-vous puis changez le mot de passe depuis votre session.'
+            });
+        }
+
+        const normalizedPhone = normalizePhone(countryCode, phoneNumber);
+        const user = (normalizedPhone && findUserByPhone(normalizedPhone)) || persistentUsers[String(pseudo || '').trim()];
+        if (!user) return callback?.({ success: false, error: 'Utilisateur introuvable' });
+        user.password = await bcrypt.hash(normalizedNewPassword, 10);
         saveData();
-        callback({ success: true });
+        callback?.({ success: true });
     });
 
-    socket.on('update-profile', ({ avatar, bio }, callback) => {
+    socket.on('update-profile', ({ avatar, bio, countryCode, phoneNumber }, callback) => {
         const pseudo = socketUsers[socket.id];
         if (!pseudo) return callback?.({ success: false });
         const user = persistentUsers[pseudo];
         if (!user) return callback?.({ success: false });
         if (avatar) user.avatar = avatar;
         if (bio !== undefined) user.bio = bio;
+        if (countryCode || phoneNumber) {
+            const nextPhone = normalizePhone(countryCode, phoneNumber);
+            if (!nextPhone) return callback?.({ success: false, error: 'Numero invalide' });
+            const duplicate = findUserByPhone(nextPhone);
+            if (duplicate && duplicate.pseudo !== pseudo) {
+                return callback?.({ success: false, error: 'Ce numero est deja utilise' });
+            }
+            user.phoneCountryCode = normalizeCountryCode(countryCode);
+            user.phoneLocalNumber = normalizePhoneLocal(phoneNumber);
+            user.phoneNumber = nextPhone;
+        }
         saveData();
         broadcastUsers();
+        broadcastStatuses();
+        callback?.({ success: true, user: selfUserPayload(user) });
+    });
+
+    socket.on('add-contact', ({ countryCode, phoneNumber }, callback) => {
+        const pseudo = socketUsers[socket.id];
+        const user = persistentUsers[pseudo];
+        if (!pseudo || !user) return callback?.({ success: false, error: 'Session invalide' });
+
+        const normalizedPhone = normalizePhone(countryCode, phoneNumber);
+        if (!normalizedPhone) return callback?.({ success: false, error: 'Numero invalide' });
+        if (normalizedPhone === getUserPhone(user)) return callback?.({ success: false, error: 'Impossible d ajouter votre propre numero' });
+
+        const targetUser = findUserByPhone(normalizedPhone);
+        if (!targetUser) return callback?.({ success: false, error: 'Aucun compte n utilise ce numero' });
+
+        ensureUserDefaults(user);
+        if (!user.contacts.includes(normalizedPhone)) user.contacts.push(normalizedPhone);
+        saveData();
+        broadcastStatuses();
+        callback?.({ success: true, user: selfUserPayload(user), contactUser: safeUser(targetUser) });
+    });
+
+    socket.on('remove-contact', ({ phoneNumber }, callback) => {
+        const pseudo = socketUsers[socket.id];
+        const user = persistentUsers[pseudo];
+        if (!pseudo || !user) return callback?.({ success: false, error: 'Session invalide' });
+
+        ensureUserDefaults(user);
+        user.contacts = user.contacts.filter(contact => contact !== normalizeStandalonePhone(phoneNumber));
+        saveData();
         broadcastStatuses();
         callback?.({ success: true, user: selfUserPayload(user) });
     });
@@ -416,6 +835,9 @@ io.on('connection', (socket) => {
         if (!group) return callback?.({ success: false, error: 'Groupe introuvable' });
         if (!group.members.includes(from)) return callback?.({ success: false, error: 'Non autorisé' });
         if (group.banned?.includes(from)) return callback?.({ success: false, error: 'Vous êtes banni' });
+        if (group.isUpdatesChannel && !group.admins.includes(from)) {
+            return callback?.({ success: false, error: 'Seuls les administrateurs peuvent publier dans ce canal' });
+        }
 
         const msg = {
             id: uuidv4(),
@@ -441,27 +863,47 @@ io.on('connection', (socket) => {
         callback?.({ success: true, message: msg });
     });
 
-    socket.on('create-group', ({ name, members, isPublic, description }, callback) => {
+    socket.on('create-group', ({ name, members, isPublic, description, avatar }, callback) => {
         const from = socketUsers[socket.id];
         if (!from) return callback?.({ success: false, error: 'Session invalide' });
+        const groupName = String(name || '').trim();
+        const memberList = Array.isArray(members) ? members.filter(member => typeof member === 'string') : [];
+        if (!groupName) return callback?.({ success: false, error: 'Nom du groupe requis' });
 
-        const group = {
+        const group = ensureGroupDefaults({
             id: uuidv4(),
-            name,
+            name: groupName,
             description: description || '',
-            members: [from, ...members.filter(member => member !== from)],
+            members: [from, ...memberList.filter(member => member !== from)],
             admins: [from],
             banned: [],
             creator: from,
             isPublic: !!isPublic,
-            avatar: `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(name)}&backgroundColor=2aabee`,
+            avatar: avatar || `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(groupName)}&backgroundColor=2aabee`,
             createdAt: new Date().toISOString()
-        };
+        });
         groups.push(group);
         saveData();
         group.members.forEach(member => {
             const sid = _getSocketId(member);
             if (sid) io.to(sid).emit('group-created', group);
+        });
+        callback?.({ success: true, group });
+    });
+
+    socket.on('update-group-profile', ({ groupId, name, description, avatar }, callback) => {
+        const from = socketUsers[socket.id];
+        const group = groups.find(item => item.id === groupId);
+        if (!group || !group.admins.includes(from)) return callback?.({ success: false, error: 'Non autorise' });
+
+        if (name) group.name = String(name).trim();
+        if (description !== undefined) group.description = description;
+        if (avatar) group.avatar = avatar;
+        ensureGroupDefaults(group);
+        saveData();
+        group.members.forEach(member => {
+            const sid = _getSocketId(member);
+            if (sid) io.to(sid).emit('group-updated', group);
         });
         callback?.({ success: true, group });
     });
@@ -520,6 +962,7 @@ io.on('connection', (socket) => {
         if (!from) return;
         const msg = messages.find(message => message.id === messageId);
         if (!msg) return;
+        if (!messageVisibleForUser(msg, from)) return;
         if (!msg.reactions) msg.reactions = {};
         if (!msg.reactions[emoji]) msg.reactions[emoji] = [];
         const idx = msg.reactions[emoji].indexOf(from);
@@ -542,6 +985,42 @@ io.on('connection', (socket) => {
         saveData();
         _broadcastToMessageParticipants(msg, 'message-deleted', { messageId });
         callback?.({ success: true });
+    });
+
+    socket.on('delete-messages', ({ messageIds }, callback) => {
+        const from = socketUsers[socket.id];
+        const ids = Array.isArray(messageIds) ? messageIds : [];
+        const targets = ids
+            .map(id => messages.find(message => message.id === id))
+            .filter(Boolean);
+        if (!from || !targets.length) return callback?.({ success: false, error: 'Aucun message valide' });
+        if (targets.some(msg => msg.from !== from)) return callback?.({ success: false, error: 'Action impossible' });
+
+        targets.forEach(msg => {
+            msg.deleted = true;
+            msg.content = '';
+            msg.fileUrl = null;
+            msg.fileName = null;
+            msg.fileType = null;
+        });
+        saveData();
+        targets.forEach(msg => _broadcastToMessageParticipants(msg, 'message-deleted', { messageId: msg.id }));
+        callback?.({ success: true, messageIds: targets.map(msg => msg.id) });
+    });
+
+    socket.on('edit-message', ({ messageId, content }, callback) => {
+        const from = socketUsers[socket.id];
+        const msg = messages.find(message => message.id === messageId);
+        const nextContent = String(content || '').trim();
+        if (!msg || msg.from !== from || msg.deleted) return callback?.({ success: false, error: 'Action impossible' });
+        if (msg.fileUrl) return callback?.({ success: false, error: 'Modification indisponible pour ce message' });
+        if (!nextContent) return callback?.({ success: false, error: 'Contenu vide' });
+
+        msg.content = nextContent;
+        msg.editedAt = new Date().toISOString();
+        saveData();
+        _broadcastToMessageParticipants(msg, 'message-edited', { message: msg });
+        callback?.({ success: true, message: msg });
     });
 
     socket.on('mark-read', ({ messageIds }) => {
@@ -582,10 +1061,13 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('create-status', ({ text, mediaUrl, fileType, fileName }, callback) => {
+    socket.on('create-status', ({ text, mediaUrl, fileType, fileName, background }, callback) => {
         const from = socketUsers[socket.id];
         if (!from) return callback?.({ success: false, error: 'Session invalide' });
         if (!text && !mediaUrl) return callback?.({ success: false, error: 'Statut vide' });
+        if (!getUserPhone(persistentUsers[from])) {
+            return callback?.({ success: false, error: 'Ajoutez votre numero principal avant de publier un statut' });
+        }
 
         const status = {
             id: uuidv4(),
@@ -594,6 +1076,7 @@ io.on('connection', (socket) => {
             mediaUrl: mediaUrl || null,
             fileType: fileType || null,
             fileName: fileName || null,
+            background: typeof background === 'string' ? background : null,
             createdAt: new Date().toISOString(),
             expiresAt: new Date(Date.now() + STATUS_TTL_MS).toISOString(),
             viewedBy: [from]
@@ -612,7 +1095,9 @@ io.on('connection', (socket) => {
     socket.on('view-status', ({ statusId }, callback) => {
         const from = socketUsers[socket.id];
         const status = statuses.find(item => item.id === statusId);
-        if (!from || !status || isExpired(status.expiresAt)) return callback?.({ success: false });
+        if (!from || !status || isExpired(status.expiresAt) || !canViewerSeeStatus(status.userPseudo, from)) {
+            return callback?.({ success: false });
+        }
         if (!status.viewedBy.includes(from)) {
             status.viewedBy.push(from);
             saveData();
@@ -635,21 +1120,57 @@ io.on('connection', (socket) => {
 
     socket.on('search-users', (query, callback) => {
         const from = socketUsers[socket.id];
+        const rawQuery = String(query || '').trim();
+        const normalizedDigits = rawQuery.replace(/\D/g, '');
         const results = Object.values(persistentUsers)
-            .filter(user => user.pseudo !== from && user.pseudo.toLowerCase().includes(query.toLowerCase()))
+            .filter(user => {
+                if (user.pseudo === from) return false;
+                const pseudoMatch = user.pseudo.toLowerCase().includes(rawQuery.toLowerCase());
+                const phone = getUserPhone(user);
+                const phoneMatch = normalizedDigits.length >= 3 && phone.replace(/\D/g, '').includes(normalizedDigits);
+                return pseudoMatch || phoneMatch;
+            })
             .map(user => ({
                 ...safeUser(user),
-                blocked: persistentUsers[from]?.blockedUsers?.includes(user.pseudo) || false
+                phoneNumber: getUserPhone(user),
+                blocked: persistentUsers[from]?.blockedUsers?.includes(user.pseudo) || false,
+                inContacts: persistentUsers[from]?.contacts?.includes(getUserPhone(user)) || false
             }));
         callback(results);
     });
 
     socket.on('get-app-stats', callback => {
+        const from = socketUsers[socket.id];
+        const user = persistentUsers[from];
+        if (!user?.isAdmin) return callback?.({ error: 'Non autorise' });
         callback?.(appStats());
     });
 
+    socket.on('get-update-channel', callback => {
+        const from = socketUsers[socket.id];
+        callback?.(safeUpdateChannel(from));
+    });
+
+    socket.on('join-update-channel', callback => {
+        const from = socketUsers[socket.id];
+        const channel = getUpdatesChannel();
+        if (!from || !channel) return callback?.({ success: false, error: 'Canal indisponible' });
+
+        if (!channel.members.includes(from)) {
+            channel.members.push(from);
+            saveData();
+            const sid = _getSocketId(from);
+            if (sid) io.to(sid).emit('group-created', channel);
+            channel.members.forEach(member => {
+                const memberSid = _getSocketId(member);
+                if (memberSid) io.to(memberSid).emit('group-updated', channel);
+            });
+        }
+        callback?.({ success: true, group: channel, updateChannel: safeUpdateChannel(from) });
+    });
+
     socket.on('get-public-groups', callback => {
-        const publicGroups = groups.filter(group => group.isPublic).map(group => ({
+        const publicGroups = groups.filter(group => group.isPublic && !group.isUpdatesChannel).map(group => ({
             ...group,
             memberCount: group.members.length
         }));
@@ -685,10 +1206,45 @@ io.on('connection', (socket) => {
     });
 });
 
-setInterval(() => {
-    cleanupExpiredMessages(true);
-    cleanupExpiredStatuses(true);
-}, 10000);
+async function bootstrap() {
+    try {
+        if (MONGODB_URI) {
+            await connectMongo();
+            console.log(`MongoDB connected (${MONGODB_DB_NAME}/${MONGODB_COLLECTION})`);
+        } else {
+            ensureStorageBootstrap();
+            console.log('MongoDB disabled, using local JSON storage');
+        }
+    } catch (err) {
+        console.error('MongoDB unavailable, fallback to local JSON storage:', err.message);
+        mongoClient = null;
+        mongoCollection = null;
+        ensureStorageBootstrap();
+    }
 
-const PORT = process.env.PORT || 3001;
-server.listen(PORT, () => console.log(`🚀 DevChat sur http://localhost:${PORT}`));
+    const loaded = await loadInitialData();
+    loaded.users.forEach(user => {
+        persistentUsers[user.pseudo] = ensureUserDefaults(user);
+    });
+    messages = (loaded.messages || []).filter(msg => !isExpired(msg.expiresAt));
+    groups = (loaded.groups || []).map(ensureGroupDefaults);
+    statuses = (loaded.statuses || []).filter(status => !isExpired(status.expiresAt));
+
+    ensureAdminAccount();
+    ensureUpdatesChannel();
+    saveData();
+
+    setInterval(() => {
+        cleanupExpiredMessages(true);
+        cleanupExpiredStatuses(true);
+        cleanupExpiredSessions();
+    }, 10000);
+
+    const PORT = process.env.PORT || 3001;
+    server.listen(PORT, () => console.log(`🚀 DevChat sur http://localhost:${PORT}`));
+}
+
+bootstrap().catch(err => {
+    console.error('Fatal bootstrap error:', err);
+    process.exit(1);
+});

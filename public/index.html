@@ -44,9 +44,18 @@
             <p>Messagerie instantanée pour développeurs</p>
         </div>
         <div class="auth-form">
+            <div class="auth-phone-row">
+                <div class="auth-select-wrap">
+                    <select id="loginCountryCode" class="auth-select"></select>
+                </div>
+                <div class="auth-input-wrap auth-phone-input">
+                    <i class="fas fa-phone"></i>
+                    <input type="tel" id="loginPhoneNumber" placeholder="Numéro de téléphone" autocomplete="tel">
+                </div>
+            </div>
             <div class="auth-input-wrap">
-                <i class="fas fa-at"></i>
-                <input type="text" id="loginPseudo" placeholder="Pseudo" autocomplete="off" autocorrect="off" autocapitalize="off">
+                <i class="fas fa-user-clock"></i>
+                <input type="text" id="loginLegacyPseudo" placeholder="Pseudo existant (optionnel, migration)" autocomplete="off" autocorrect="off" autocapitalize="off">
             </div>
             <div class="auth-input-wrap">
                 <i class="fas fa-lock"></i>
@@ -88,6 +97,15 @@
                 <i class="fas fa-at"></i>
                 <input type="text" id="regPseudo" placeholder="Pseudo" autocomplete="off" autocorrect="off" autocapitalize="off">
             </div>
+            <div class="auth-phone-row">
+                <div class="auth-select-wrap">
+                    <select id="regCountryCode" class="auth-select"></select>
+                </div>
+                <div class="auth-input-wrap auth-phone-input">
+                    <i class="fas fa-phone"></i>
+                    <input type="tel" id="regPhoneNumber" placeholder="Numéro de téléphone" autocomplete="tel">
+                </div>
+            </div>
             <div class="auth-input-wrap">
                 <i class="fas fa-lock"></i>
                 <input type="password" id="regPassword" placeholder="Mot de passe">
@@ -118,9 +136,18 @@
             <p>Changez votre mot de passe</p>
         </div>
         <div class="auth-form">
+            <div class="auth-phone-row">
+                <div class="auth-select-wrap">
+                    <select id="resetCountryCode" class="auth-select"></select>
+                </div>
+                <div class="auth-input-wrap auth-phone-input">
+                    <i class="fas fa-phone"></i>
+                    <input type="tel" id="resetPhoneNumber" placeholder="Numéro de téléphone" autocomplete="tel">
+                </div>
+            </div>
             <div class="auth-input-wrap">
-                <i class="fas fa-at"></i>
-                <input type="text" id="resetPseudo" placeholder="Votre pseudo">
+                <i class="fas fa-user-clock"></i>
+                <input type="text" id="resetPseudo" placeholder="Pseudo existant (optionnel)">
             </div>
             <div class="auth-input-wrap">
                 <i class="fas fa-lock"></i>
@@ -164,7 +191,7 @@
         <div class="sidebar-search">
             <div class="search-wrap">
                 <i class="fas fa-search"></i>
-                <input type="text" id="sidebarSearch" placeholder="Rechercher...">
+                <input type="text" id="sidebarSearch" placeholder="Rechercher par numéro ou pseudo...">
                 <button id="searchClearBtn" style="display:none"><i class="fas fa-times"></i></button>
             </div>
         </div>
@@ -175,6 +202,13 @@
         </div>
 
         <div class="status-strip" id="statusStrip"></div>
+        <div id="updateChannelPrompt" class="update-channel-prompt" style="display:none">
+            <div class="update-channel-copy">
+                <strong>Restez informé</strong>
+                <span>Rejoignez le canal discret de mises à jour de DevChat.</span>
+            </div>
+            <button id="joinUpdateChannelBtn" class="btn-primary">Rejoindre</button>
+        </div>
 
         <!-- Conversations -->
         <div class="conversations-list" id="conversationsList"></div>
@@ -251,6 +285,13 @@
                 <div class="ctx-item ctx-secret" id="ctxSecretChat" style="display:none"><i class="fas fa-lock"></i> Chat secret</div>
             </div>
         </div>
+        <div class="message-selection-bar" id="messageSelectionBar" style="display:none">
+            <div class="message-selection-count" id="messageSelectionCount">0 sélectionné</div>
+            <div class="message-selection-actions">
+                <button class="btn-secondary" id="cancelMessageSelectionBtn">Annuler</button>
+                <button class="btn-danger" id="deleteSelectedMessagesBtn">Supprimer</button>
+            </div>
+        </div>
 
         <!-- Messages Container -->
         <div class="messages-container" id="messagesContainer"></div>
@@ -275,6 +316,9 @@
 
         <!-- Input Area -->
         <div class="message-input-area" id="messageInputArea" style="display:none">
+            <div class="chat-readonly-notice" id="chatReadonlyNotice" style="display:none">
+                Seul l'administrateur peut publier dans ce canal officiel.
+            </div>
             <button class="icon-btn attach-btn" id="attachBtn"><i class="fas fa-paperclip"></i></button>
             <div class="input-wrapper">
                 <button class="emoji-inline-btn" id="emojiBtn"><i class="far fa-smile-wink"></i></button>
@@ -318,6 +362,7 @@
                 <div class="group-avatar-preview" id="groupAvatarPreview">
                     <i class="fas fa-camera"></i>
                 </div>
+                <input type="file" id="groupAvatarFile" style="display:none" accept="image/*">
             </div>
             <div class="form-row">
                 <input type="text" id="groupName" placeholder="Nom du groupe" class="modal-input">
@@ -374,13 +419,37 @@
                 <input type="file" id="profileAvatarFile" style="display:none" accept="image/*">
             </div>
             <div class="profile-pseudo" id="profilePseudo"></div>
+            <div class="profile-admin-badge" id="profileAdminBadge" style="display:none">Administrateur</div>
+            <div class="form-row">
+                <label class="modal-label">Numéro principal</label>
+                <div class="auth-phone-row profile-phone-row">
+                    <div class="auth-select-wrap">
+                        <select id="profileCountryCode" class="auth-select"></select>
+                    </div>
+                    <input type="tel" id="profilePhoneNumber" placeholder="Numéro de téléphone" class="modal-input" autocomplete="tel">
+                </div>
+                <small id="profilePhoneHint" class="form-help"></small>
+            </div>
             <div class="form-row">
                 <textarea id="profileBio" placeholder="Bio (optionnel)" class="modal-input" rows="3"></textarea>
             </div>
             <div class="form-row">
+                <label class="modal-label">Contacts pour les statuts</label>
+                <div class="auth-phone-row profile-phone-row">
+                    <div class="auth-select-wrap">
+                        <select id="contactCountryCode" class="auth-select"></select>
+                    </div>
+                    <input type="tel" id="contactPhoneNumber" placeholder="Ajouter un numéro enregistré" class="modal-input" autocomplete="tel">
+                </div>
+                <button class="btn-secondary" id="addContactBtn" style="width:100%;margin-top:8px">Ajouter ce contact</button>
+                <small class="form-help">Les statuts sont visibles uniquement entre contacts mutuels.</small>
+                <div id="contactsList" class="contacts-list"></div>
+            </div>
+            <div class="form-row">
                 <button class="btn-secondary" id="enableNotificationsBtn" style="width:100%">Activer les notifications</button>
             </div>
-            <div class="profile-stats-grid" id="profileStatsGrid">
+            <div id="profileStatsNotice" class="profile-stats-notice">Les statistiques de l'application sont réservées au compte administrateur.</div>
+            <div class="profile-stats-grid" id="profileStatsGrid" style="display:none">
                 <div class="profile-stat-card"><span>Total users</span><strong id="statUsers">-</strong></div>
                 <div class="profile-stat-card"><span>En ligne</span><strong id="statOnlineUsers">-</strong></div>
                 <div class="profile-stat-card"><span>Groupes</span><strong id="statGroups">-</strong></div>
@@ -402,6 +471,21 @@
             <button class="icon-btn close-modal-btn" data-modal="manageGroupModal"><i class="fas fa-times"></i></button>
         </div>
         <div class="modal-body">
+            <div class="group-avatar-row">
+                <div class="group-avatar-preview" id="manageGroupAvatarPreview">
+                    <i class="fas fa-camera"></i>
+                </div>
+                <input type="file" id="manageGroupAvatarFile" style="display:none" accept="image/*">
+            </div>
+            <div class="form-row">
+                <input type="text" id="manageGroupName" placeholder="Nom du groupe" class="modal-input">
+            </div>
+            <div class="form-row">
+                <input type="text" id="manageGroupDesc" placeholder="Description" class="modal-input">
+            </div>
+            <div class="form-row">
+                <button class="btn-secondary" id="saveGroupProfileBtn" style="width:100%">Enregistrer le profil du groupe</button>
+            </div>
             <div id="manageMembersList" class="members-manage-list"></div>
             <div class="form-row" style="margin-top:16px">
                 <input type="text" id="addMemberInput" placeholder="Ajouter un membre (pseudo)" class="modal-input">
@@ -422,9 +506,13 @@
                 <textarea id="statusTextInput" placeholder="Écrivez un statut..." class="modal-input" rows="3"></textarea>
             </div>
             <div class="form-row">
+                <div id="statusThemePicker" class="status-theme-picker"></div>
+            </div>
+            <div class="form-row">
                 <button class="btn-secondary" id="pickStatusMediaBtn" style="width:100%">Ajouter une image ou vidéo</button>
                 <input type="file" id="statusMediaInput" style="display:none" accept="image/*,video/*">
             </div>
+            <div id="statusAudienceHint" class="status-audience-hint">Visible seulement par les contacts mutuels qui ont enregistré votre numéro.</div>
             <div id="statusComposerPreview" class="status-composer-preview"></div>
             <div id="myStatusesList" class="my-statuses-list"></div>
         </div>

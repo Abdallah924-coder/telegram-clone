@@ -7,10 +7,17 @@
       "bio": "Nous sommes là pour toutes achat et vente de cryptomonnaie",
       "createdAt": "2026-04-22T19:00:25.143Z",
       "online": true,
-      "lastSeen": "2026-04-22T21:44:50.688Z",
+      "lastSeen": "2026-04-24T03:13:51.695Z",
       "blockedUsers": [],
       "hiddenChats": {},
-      "ephemeralSettings": {}
+      "ephemeralSettings": {},
+      "phoneCountryCode": "+242",
+      "phoneLocalNumber": "069325937",
+      "phoneNumber": "+242069325937",
+      "contacts": [
+        "+242069227277"
+      ],
+      "isAdmin": false
     },
     {
       "pseudo": "Devoue",
@@ -19,11 +26,35 @@
       "bio": "",
       "createdAt": "2026-04-22T19:02:43.771Z",
       "online": true,
-      "lastSeen": "2026-04-22T21:43:18.050Z",
+      "lastSeen": "2026-04-24T03:12:21.475Z",
       "blockedUsers": [],
       "hiddenChats": {
         "private:Magellan": "2026-04-22T21:33:04.949Z"
       },
+      "ephemeralSettings": {},
+      "phoneCountryCode": "+242",
+      "phoneLocalNumber": "069227277",
+      "phoneNumber": "+242069227277",
+      "contacts": [
+        "+242069325937"
+      ],
+      "isAdmin": false
+    },
+    {
+      "pseudo": "Admin DevChat",
+      "password": "$2b$10$.kjKlQJEFScl1nUx1C9eUeSPbfn6oSDvsIjEWZgrX0vZG37Hjit1a",
+      "avatar": "https://api.dicebear.com/7.x/initials/svg?seed=Admin%20DevChat&backgroundColor=2aabee&fontFamily=Helvetica",
+      "bio": "Compte administrateur",
+      "createdAt": "2026-04-24T01:17:23.256Z",
+      "online": false,
+      "lastSeen": "2026-04-24T01:17:23.257Z",
+      "isAdmin": true,
+      "phoneCountryCode": "+242",
+      "phoneLocalNumber": "0000000000",
+      "phoneNumber": "+2420000000000",
+      "contacts": [],
+      "blockedUsers": [],
+      "hiddenChats": {},
       "ephemeralSettings": {}
     }
   ],
@@ -243,6 +274,211 @@
         "Magellan"
       ],
       "reactions": {}
+    },
+    {
+      "id": "74c09431-cfe6-482a-878a-0593032ec406",
+      "type": "private",
+      "isSecret": false,
+      "isEphemeral": false,
+      "expiresAt": null,
+      "from": "Devoue",
+      "to": "Magellan",
+      "content": "Hey",
+      "fileUrl": null,
+      "fileName": null,
+      "fileType": null,
+      "replyTo": null,
+      "date": "2026-04-24T01:24:51.551Z",
+      "readBy": [
+        "Devoue",
+        "Magellan"
+      ],
+      "reactions": {}
+    },
+    {
+      "id": "b428e3dc-fb1b-4593-9d97-33d4b1d1d269",
+      "type": "private",
+      "isSecret": false,
+      "isEphemeral": false,
+      "expiresAt": null,
+      "from": "Magellan",
+      "to": "Devoue",
+      "content": "What's up ?",
+      "fileUrl": null,
+      "fileName": null,
+      "fileType": null,
+      "replyTo": null,
+      "date": "2026-04-24T01:25:13.583Z",
+      "readBy": [
+        "Magellan",
+        "Devoue"
+      ],
+      "reactions": {}
+    },
+    {
+      "id": "b799975b-7c36-4595-aee3-dd0d9e09bd9f",
+      "type": "private",
+      "isSecret": false,
+      "isEphemeral": false,
+      "expiresAt": null,
+      "from": "Devoue",
+      "to": "Magellan",
+      "content": "Tu fais quoi ?",
+      "fileUrl": null,
+      "fileName": null,
+      "fileType": null,
+      "replyTo": "d235f7fb-051f-464a-894f-035763cb25b7",
+      "date": "2026-04-24T01:26:46.537Z",
+      "readBy": [
+        "Devoue",
+        "Magellan"
+      ],
+      "reactions": {}
+    },
+    {
+      "id": "5e6aa38d-1e36-4bf2-8663-d2775422bbdf",
+      "type": "private",
+      "isSecret": false,
+      "isEphemeral": false,
+      "expiresAt": null,
+      "from": "Devoue",
+      "to": "Magellan",
+      "content": "Champion",
+      "fileUrl": null,
+      "fileName": null,
+      "fileType": null,
+      "replyTo": null,
+      "date": "2026-04-24T02:25:12.483Z",
+      "readBy": [
+        "Devoue",
+        "Magellan"
+      ],
+      "reactions": {}
+    },
+    {
+      "id": "cda3b4bd-0b8d-4ecd-be8a-1a57556060f9",
+      "type": "private",
+      "isSecret": false,
+      "isEphemeral": false,
+      "expiresAt": null,
+      "from": "Magellan",
+      "to": "Devoue",
+      "content": "Comment ?",
+      "fileUrl": null,
+      "fileName": null,
+      "fileType": null,
+      "replyTo": null,
+      "date": "2026-04-24T02:25:31.878Z",
+      "readBy": [
+        "Magellan",
+        "Devoue"
+      ],
+      "reactions": {}
+    },
+    {
+      "id": "43d93145-b8a2-497e-8df2-8d4f2f51f44a",
+      "type": "group",
+      "groupId": "feb61fd3-b840-441e-95c3-5e7de0ef46ab",
+      "from": "Magellan",
+      "content": "",
+      "fileUrl": "/uploads/1776998411619-fbc509f0.webm",
+      "fileName": "Screencast from 2026-03-18 02-27-52.webm",
+      "fileType": "video/webm",
+      "replyTo": null,
+      "date": "2026-04-24T02:40:11.651Z",
+      "readBy": [
+        "Magellan"
+      ],
+      "reactions": {}
+    },
+    {
+      "id": "48509162-4863-4f82-aeed-1901005b6d6a",
+      "type": "private",
+      "isSecret": false,
+      "isEphemeral": false,
+      "expiresAt": null,
+      "from": "Devoue",
+      "to": "Magellan",
+      "content": "Ça va et toi ?",
+      "fileUrl": null,
+      "fileName": null,
+      "fileType": null,
+      "replyTo": null,
+      "date": "2026-04-24T02:46:38.140Z",
+      "readBy": [
+        "Devoue",
+        "Magellan"
+      ],
+      "reactions": {}
+    },
+    {
+      "id": "605f2309-29b0-4617-a59f-b72313eafbac",
+      "type": "private",
+      "isSecret": false,
+      "isEphemeral": false,
+      "expiresAt": null,
+      "from": "Magellan",
+      "to": "Devoue",
+      "content": "",
+      "fileUrl": "/uploads/1776998840146-19c77bba.png",
+      "fileName": "logo_icon_512.png",
+      "fileType": "image/png",
+      "replyTo": null,
+      "date": "2026-04-24T02:47:20.461Z",
+      "readBy": [
+        "Magellan",
+        "Devoue"
+      ],
+      "reactions": {
+        "👍": [
+          "Devoue"
+        ]
+      }
+    },
+    {
+      "id": "44db8544-e722-4b74-9bfc-5aebd1dbee51",
+      "type": "private",
+      "isSecret": false,
+      "isEphemeral": false,
+      "expiresAt": null,
+      "from": "Magellan",
+      "to": "Devoue",
+      "content": "",
+      "fileUrl": "/uploads/1776999735215-fc54f521.webm",
+      "fileName": "note-vocale-1776999735064.webm",
+      "fileType": "audio/webm",
+      "replyTo": null,
+      "date": "2026-04-24T03:02:15.239Z",
+      "readBy": [
+        "Magellan",
+        "Devoue"
+      ],
+      "reactions": {
+        "😂": [
+          "Magellan"
+        ]
+      }
+    },
+    {
+      "id": "92597a1d-8ebc-4524-9620-57d4051325ca",
+      "type": "private",
+      "isSecret": false,
+      "isEphemeral": false,
+      "expiresAt": null,
+      "from": "Devoue",
+      "to": "Magellan",
+      "content": "Salut boss",
+      "fileUrl": null,
+      "fileName": null,
+      "fileType": null,
+      "replyTo": null,
+      "date": "2026-04-24T03:12:59.172Z",
+      "readBy": [
+        "Devoue",
+        "Magellan"
+      ],
+      "reactions": {},
+      "editedAt": "2026-04-24T03:13:12.741Z"
     }
   ],
   "groups": [
@@ -261,22 +497,91 @@
       "creator": "Magellan",
       "isPublic": false,
       "avatar": "https://api.dicebear.com/7.x/initials/svg?seed=GSAM%20TERMINALE%20D&backgroundColor=2aabee",
-      "createdAt": "2026-04-22T19:07:50.823Z"
+      "createdAt": "2026-04-22T19:07:50.823Z",
+      "isUpdatesChannel": false,
+      "joinByPrompt": false,
+      "systemKey": null
+    },
+    {
+      "id": "f6f1c789-cfd1-483e-a31b-b8f177c22d5d",
+      "name": "Mises a jour DevChat",
+      "description": "Rejoignez ce canal pour recevoir les annonces et nouvelles fonctionnalites de l'application.",
+      "members": [
+        "Admin DevChat",
+        "Magellan",
+        "Devoue"
+      ],
+      "admins": [
+        "Admin DevChat"
+      ],
+      "banned": [],
+      "creator": "Admin DevChat",
+      "isPublic": false,
+      "isUpdatesChannel": true,
+      "joinByPrompt": true,
+      "systemKey": "system:updates",
+      "avatar": "https://api.dicebear.com/7.x/shapes/svg?seed=updates-devchat&backgroundColor=2aabee",
+      "createdAt": "2026-04-24T01:17:23.259Z"
     }
   ],
   "statuses": [
     {
-      "id": "77498901-947d-4b38-88e3-7509092d537f",
+      "id": "fdec1da6-87b6-4642-9569-5ebc0c33ae8d",
       "userPseudo": "Devoue",
-      "text": "Je l'ai fait.",
+      "text": "Salut",
       "mediaUrl": null,
       "fileType": null,
       "fileName": null,
-      "createdAt": "2026-04-22T21:30:08.893Z",
-      "expiresAt": "2026-04-23T21:30:08.893Z",
+      "createdAt": "2026-04-24T02:30:24.684Z",
+      "expiresAt": "2026-04-25T02:30:24.684Z",
       "viewedBy": [
         "Devoue",
         "Magellan"
+      ]
+    },
+    {
+      "id": "3ff30c2e-6c4d-49fb-8b60-29af8024d87c",
+      "userPseudo": "Magellan",
+      "text": "Bonjour la team",
+      "mediaUrl": null,
+      "fileType": null,
+      "fileName": null,
+      "background": "night",
+      "createdAt": "2026-04-24T02:41:05.286Z",
+      "expiresAt": "2026-04-25T02:41:05.286Z",
+      "viewedBy": [
+        "Magellan",
+        "Devoue"
+      ]
+    },
+    {
+      "id": "a306e761-74fd-46ea-bbc6-aacb17ea2e6e",
+      "userPseudo": "Devoue",
+      "text": "",
+      "mediaUrl": "/uploads/1776999628885-f230977c.webm",
+      "fileType": "video/webm",
+      "fileName": "Screencast from 2026-03-18 02-31-55.webm",
+      "background": "ocean",
+      "createdAt": "2026-04-24T03:00:34.739Z",
+      "expiresAt": "2026-04-25T03:00:34.739Z",
+      "viewedBy": [
+        "Devoue",
+        "Magellan"
+      ]
+    },
+    {
+      "id": "08b7efda-c913-4af7-8035-59f3aa4b3516",
+      "userPseudo": "Magellan",
+      "text": "C'est un bon je vous assure.",
+      "mediaUrl": null,
+      "fileType": null,
+      "fileName": null,
+      "background": "sunset",
+      "createdAt": "2026-04-24T03:01:20.085Z",
+      "expiresAt": "2026-04-25T03:01:20.085Z",
+      "viewedBy": [
+        "Magellan",
+        "Devoue"
       ]
     }
   ]
