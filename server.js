@@ -558,10 +558,23 @@ function ensureAdminAccount() {
 }
 
 function ensureUpdatesChannel() {
-    if (getUpdatesChannel()) return;
     const admin = Object.values(persistentUsers).find(user => user.isAdmin);
     if (!admin) return;
 
+    const existing = getUpdatesChannel();
+    if (existing) {
+        // S'assurer que l'admin actuel est bien dans les admins et membres du canal
+        if (!existing.admins.includes(admin.pseudo)) {
+            existing.admins.push(admin.pseudo);
+            console.log(`✅ Canal updates: "${admin.pseudo}" ajouté aux admins`);
+        }
+        if (!existing.members.includes(admin.pseudo)) {
+            existing.members.push(admin.pseudo);
+        }
+        return;
+    }
+
+    // Créer le canal s'il n'existe pas
     groups.push(ensureGroupDefaults({
         id: uuidv4(),
         name: 'Mises a jour DevChat',
@@ -577,6 +590,7 @@ function ensureUpdatesChannel() {
         avatar: `https://api.dicebear.com/7.x/shapes/svg?seed=${encodeURIComponent('updates-devchat')}&backgroundColor=2aabee`,
         createdAt: new Date().toISOString()
     }));
+    console.log(`✅ Canal updates créé par "${admin.pseudo}"`);
 }
 
 const storage = multer.diskStorage({

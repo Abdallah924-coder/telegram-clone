@@ -87,7 +87,12 @@ function statusTextPreviewHtml(text, key) {
 function isReadonlyOfficialChannel(chat = currentChat) {
     if (!chat || chat.type !== 'group') return false;
     const group = groups.find(item => item.id === chat.id);
-    return !!(group?.isUpdatesChannel && !group?.admins?.includes(currentUser?.pseudo));
+    if (!group?.isUpdatesChannel) return false;
+    // L'admin de l'app peut toujours écrire dans le canal
+    if (currentUser?.isAdmin) return false;
+    // Les admins du groupe peuvent aussi écrire
+    if (group?.admins?.includes(currentUser?.pseudo)) return false;
+    return true;
 }
 
 function refreshChatComposerState() {
