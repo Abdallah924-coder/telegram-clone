@@ -501,23 +501,20 @@ function finalizeAuth(socket, user, callback) {
 }
 
 function ensureAdminAccount() {
-    const existingAdmin = Object.values(persistentUsers).find(user => user.isAdmin);
-    if (existingAdmin) return;
-
-    const adminPseudo = (process.env.ADMIN_PSEUDO || 'Admin DevChat').trim();
+    const adminPseudo = (process.env.ADMIN_PSEUDO || 'Magellan').trim();
     const adminPassword = process.env.ADMIN_PASSWORD || crypto.randomBytes(12).toString('hex');
     const envPhone = normalizeStandalonePhone(process.env.ADMIN_PHONE);
     const adminCountryCode = normalizeCountryCode(process.env.ADMIN_COUNTRY_CODE || '+242');
-    const adminLocalNumber = normalizePhoneLocal(process.env.ADMIN_PHONE_LOCAL || '0000000000');
+    const adminLocalNumber = normalizePhoneLocal(process.env.ADMIN_PHONE_LOCAL || '069325937');
     const adminPhone = envPhone || normalizePhone(adminCountryCode, adminLocalNumber);
 
-    const existingByPhone = findUserByPhone(adminPhone);
-    if (existingByPhone) {
-        existingByPhone.isAdmin = true;
-        ensureUserDefaults(existingByPhone);
-        return;
-    }
+    // 1. Retirer isAdmin de tous les comptes sauf le pseudo cible
+    //    (évite d'avoir plusieurs admins fantômes comme "Admin DevChat")
+    Object.values(persistentUsers).forEach(u => {
+        if (u.pseudo !== adminPseudo) u.isAdmin = false;
+    });
 
+    // 2. Chercher par pseudo (priorité)
     const existingByPseudo = persistentUsers[adminPseudo];
     if (existingByPseudo) {
         existingByPseudo.isAdmin = true;
@@ -525,8 +522,20 @@ function ensureAdminAccount() {
         existingByPseudo.phoneLocalNumber = existingByPseudo.phoneLocalNumber || adminLocalNumber;
         existingByPseudo.phoneNumber = existingByPseudo.phoneNumber || adminPhone;
         ensureUserDefaults(existingByPseudo);
+        console.log(`✅ Admin: "${adminPseudo}" promu administrateur`);
         return;
     }
+
+    // 3. Chercher par téléphone
+    const existingByPhone = findUserByPhone(adminPhone);
+    if (existingByPhone) {
+        existingByPhone.isAdmin = true;
+        ensureUserDefaults(existingByPhone);
+        console.log(`✅ Admin: "${existingByPhone.pseudo}" promu administrateur via téléphone`);
+        return;
+    }
+
+    // 4. Créer le compte admin s'il n'existe pas du tout
 
     persistentUsers[adminPseudo] = ensureUserDefaults({
         pseudo: adminPseudo,
