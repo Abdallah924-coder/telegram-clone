@@ -4,8 +4,8 @@
   "description": "Application de messagerie instantanée",
   "start_url": "/",
   "display": "standalone",
-  "theme_color": "#2aabee",
-  "background_color": "#17212b",
+  "theme_color": "#111b21",
+  "background_color": "#0b141a",
   "orientation": "portrait",
   "icons": [
     { "src": "/icons/icon-72.png", "sizes": "72x72", "type": "image/png" },

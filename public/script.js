@@ -23,6 +23,7 @@ let unreadCounts  = {};
 let mediaRecorder = null;
 let isRecording   = false;
 let regAvatarUrl  = null;
+let pendingRegistrationAvatarFile = null;
 let socketListenersInitialized = false;
 let sendLockUntil = 0;
 let statuses = [];
@@ -38,6 +39,21 @@ let authSessionToken = null;
 let selectedStatusTheme = 'ocean';
 let mediaRecorderStream = null;
 let selectedMessageIds = new Set();
+let activeCall = null;
+let pendingIncomingCall = null;
+let callHistory = [];
+
+function persistSessionAuth(session) {
+    if (!session?.pseudo || !session?.token) return;
+    localStorage.setItem('devchat_auth', JSON.stringify({
+        pseudo: session.pseudo,
+        token: session.token
+    }));
+}
+
+function clearSessionAuth() {
+    localStorage.removeItem('devchat_auth');
+}
 
 const EPHEMERAL_CHOICES = [
     { label: 'Désactivé', value: 0 },
@@ -67,6 +83,8 @@ const STATUS_THEMES = [
 
 // ── DOM Shortcuts ──────────────────────────────────────────────
 const $ = id => document.getElementById(id);
+$('chatArea')?.appendChild($('replyPreview'));
+$('chatArea')?.appendChild($('messageSelectionBar'));
 
 async function apiFetch(url, options = {}) {
     const headers = new Headers(options.headers || {});
@@ -91,6 +109,12 @@ function statusTextPreviewHtml(text, key) {
     return `<div class="status-text-preview-inner">${escHtml(text || 'Votre texte de statut')}</div>`;
 }
 
+function maskPhoneNumber(value) {
+    const normalized = String(value || '').trim();
+    if (!normalized) return 'Numéro masqué';
+    return normalized;
+}
+
 function isReadonlyOfficialChannel(chat = currentChat) {
     if (!chat || chat.type !== 'group') return false;
     const group = groups.find(item => item.id === chat.id);
@@ -113,16 +137,16 @@ function refreshChatComposerState() {
 }
 
 function updateComposerActionButtons() {
-    if (!$('sendBtn') || !$('voiceBtn') || !$('messageInput')) return;
+    if (!$('sendBtn') || !$('voiceRecordBtn') || !$('messageInput')) return;
     const canRecord = !!(navigator.mediaDevices?.getUserMedia && window.MediaRecorder);
     if (isReadonlyOfficialChannel()) {
         $('sendBtn').style.display = 'none';
-        $('voiceBtn').style.display = 'none';
+        $('voiceRecordBtn').style.display = 'none';
         return;
     }
     const hasText = !!$('messageInput').value.trim();
     $('sendBtn').style.display = hasText || isRecording ? 'inline-flex' : 'none';
-    $('voiceBtn').style.display = !canRecord || hasText ? 'none' : 'inline-flex';
+    $('voiceRecordBtn').style.display = !canRecord || hasText ? 'none' : 'inline-flex';
 }
 
 function stopVoiceStream() {
@@ -243,6 +267,22 @@ function updateStatusComposerPreview() {
 function showPanel(id) {
     document.querySelectorAll('.auth-card').forEach(c => c.classList.remove('active'));
     $(id).classList.add('active');
+    ['loginError', 'registerError', 'registerSuccess', 'resetError', 'resetSuccess'].forEach(elId => {
+        if ($(elId)) $(elId).textContent = '';
+    });
+}
+
+function isValidEmail(value) {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || '').trim().toLowerCase());
+}
+
+function setButtonBusy(buttonId, busy, busyLabel = 'Chargement...') {
+    const btn = $(buttonId);
+    if (!btn) return;
+    if (!btn.dataset.defaultLabel) btn.dataset.defaultLabel = btn.innerHTML;
+    btn.disabled = !!busy;
+    btn.classList.toggle('loading', !!busy);
+    btn.innerHTML = busy ? `<span>${busyLabel}</span>` : btn.dataset.defaultLabel;
 }
 
 function initCountrySelect(id, defaultCode = '+242') {
@@ -259,19 +299,38 @@ function initCountrySelectors() {
 
 initCountrySelectors();
 
+async function uploadAvatarFile(file) {
+    const fd = new FormData();
+    fd.append('avatar', file);
+    return apiFetch('/api/upload-avatar', { method: 'POST', body: fd });
+}
+
+async function flushPendingRegistrationAvatar() {
+    if (!pendingRegistrationAvatarFile || !currentUser || !authSessionToken) return;
+    try {
+        const data = await uploadAvatarFile(pendingRegistrationAvatarFile);
+        pendingRegistrationAvatarFile = null;
+        currentUser.avatar = data.avatarUrl;
+        socket.emit('update-profile', { avatar: data.avatarUrl, bio: currentUser.bio || '', countryCode: currentUser.phoneCountryCode || '+242', phoneNumber: currentUser.phoneLocalNumber || '' }, (res) => {
+            if (res?.success) {
+                currentUser = res.user;
+                updateSidebarUser();
+                renderConversations();
+            }
+        });
+    } catch (err) {
+        showToast('Photo de profil non synchronisée');
+    }
+}
+
 // Avatar preview for registration
 $('regAvatarPreview').addEventListener('click', () => $('regAvatarFile').click());
 $('regAvatarFile').addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    try {
-        const fd = new FormData(); fd.append('avatar', file);
-        const data = await apiFetch('/api/upload-avatar', { method: 'POST', body: fd });
-        regAvatarUrl = data.avatarUrl;
-        $('regAvatarPreview').innerHTML = `<img src="${regAvatarUrl}" alt="">`;
-    } catch (err) {
-        showAuthError('registerError', err.message);
-    }
+    pendingRegistrationAvatarFile = file;
+    regAvatarUrl = URL.createObjectURL(file);
+    $('regAvatarPreview').innerHTML = `<img src="${regAvatarUrl}" alt="">`;
 });
 
 // ── Login ──────────────────────────────────────────────────────
@@ -284,8 +343,12 @@ $('loginBtn').addEventListener('click', async () => {
     $('loginBtn').classList.add('loading');
     socket.emit('auth', { pseudo, countryCode, phoneNumber, password, isRegister: false }, (res) => {
         $('loginBtn').classList.remove('loading');
-        if (res.success) { onAuthSuccess(res); }
-        else showAuthError('loginError', res.error);
+        if (res.success) {
+            onAuthSuccess(res);
+        } else {
+            clearSessionAuth();
+            showAuthError('loginError', res.error);
+        }
     });
 });
 $('loginPassword').addEventListener('keypress', e => { if (e.key === 'Enter') $('loginBtn').click(); });
@@ -293,18 +356,37 @@ $('loginPassword').addEventListener('keypress', e => { if (e.key === 'Enter') $(
 // ── Register ───────────────────────────────────────────────────
 $('registerBtn').addEventListener('click', async () => {
     const pseudo = $('regPseudo').value.trim();
+    const email = $('regEmail').value.trim();
     const countryCode = $('regCountryCode').value;
     const phoneNumber = $('regPhoneNumber').value.trim();
     const pw1    = $('regPassword').value;
     const pw2    = $('regPassword2').value;
-    if (!pseudo || !pw1 || !phoneNumber) return showAuthError('registerError', 'Remplissez tous les champs');
+    const otp = $('regOtp').value.trim();
+    if (!pseudo || !pw1 || !phoneNumber || !email || !otp) return showAuthError('registerError', 'Remplissez tous les champs');
+    if (!isValidEmail(email)) return showAuthError('registerError', 'Email invalide');
     if (pw1 !== pw2)     return showAuthError('registerError', 'Mots de passe différents');
     if (pw1.length < 4)  return showAuthError('registerError', 'Mot de passe trop court (min 4 caractères)');
     $('registerBtn').classList.add('loading');
-    socket.emit('auth', { pseudo, countryCode, phoneNumber, password: pw1, isRegister: true, avatar: regAvatarUrl }, (res) => {
+    socket.emit('auth', { pseudo, email, otp, countryCode, phoneNumber, password: pw1, isRegister: true, avatar: null }, (res) => {
         $('registerBtn').classList.remove('loading');
-        if (res.success) { onAuthSuccess(res); }
+        if (res.success) onAuthSuccess(res);
         else showAuthError('registerError', res.error);
+    });
+});
+
+$('sendRegisterOtpBtn').addEventListener('click', () => {
+    const pseudo = $('regPseudo').value.trim();
+    const email = $('regEmail').value.trim();
+    const countryCode = $('regCountryCode').value;
+    const phoneNumber = $('regPhoneNumber').value.trim();
+    if (!pseudo || !email || !phoneNumber) return showAuthError('registerError', 'Pseudo, email et numéro requis');
+    if (!isValidEmail(email)) return showAuthError('registerError', 'Email invalide');
+    setButtonBusy('sendRegisterOtpBtn', true, 'Envoi OTP...');
+    socket.emit('request-register-otp', { pseudo, email, countryCode, phoneNumber }, (res) => {
+        setButtonBusy('sendRegisterOtpBtn', false);
+        if (!res?.success) return showAuthError('registerError', res?.error || 'Erreur');
+        $('registerSuccess').textContent = res.devOtp ? `OTP dev: ${res.devOtp}` : 'Code OTP envoyé sur votre email';
+        showToast(res.devOtp ? `OTP dev: ${res.devOtp}` : 'Code OTP envoyé');
     });
 });
 
@@ -313,9 +395,12 @@ $('resetBtn').addEventListener('click', () => {
     const pseudo = $('resetPseudo').value.trim();
     const countryCode = $('resetCountryCode').value;
     const phoneNumber = $('resetPhoneNumber').value.trim();
+    const email = $('resetEmail').value.trim();
+    const otp = $('resetOtp').value.trim();
     const newPw  = $('resetNewPw').value;
-    if ((!pseudo && !phoneNumber) || !newPw) return showAuthError('resetError', 'Ajoutez un numero ou un pseudo existant');
-    socket.emit('reset-password', { pseudo, countryCode, phoneNumber, newPassword: newPw }, (res) => {
+    if ((!pseudo && !phoneNumber) || !newPw || !email || !otp) return showAuthError('resetError', 'Complétez pseudo/numéro, email, OTP et nouveau mot de passe');
+    if (!isValidEmail(email)) return showAuthError('resetError', 'Email invalide');
+    socket.emit('reset-password', { pseudo, countryCode, phoneNumber, email, otp, newPassword: newPw }, (res) => {
         if (res.success) {
             $('resetError').textContent = '';
             $('resetSuccess').textContent = 'Mot de passe modifié ! Connectez-vous.';
@@ -324,7 +409,28 @@ $('resetBtn').addEventListener('click', () => {
     });
 });
 
-function showAuthError(id, msg) { $(id).textContent = msg; setTimeout(() => $(id).textContent = '', 3500); }
+$('sendResetOtpBtn').addEventListener('click', () => {
+    const pseudo = $('resetPseudo').value.trim();
+    const countryCode = $('resetCountryCode').value;
+    const phoneNumber = $('resetPhoneNumber').value.trim();
+    const email = $('resetEmail').value.trim();
+    if ((!pseudo && !phoneNumber) || !email) return showAuthError('resetError', 'Ajoutez pseudo/numéro et email');
+    if (!isValidEmail(email)) return showAuthError('resetError', 'Email invalide');
+    setButtonBusy('sendResetOtpBtn', true, 'Envoi OTP...');
+    socket.emit('request-reset-otp', { pseudo, countryCode, phoneNumber, email }, (res) => {
+        setButtonBusy('sendResetOtpBtn', false);
+        if (!res?.success) return showAuthError('resetError', res?.error || 'Erreur');
+        $('resetSuccess').textContent = res.devOtp ? `OTP dev: ${res.devOtp}` : 'Code OTP envoyé sur votre email';
+        showToast(res.devOtp ? `OTP dev: ${res.devOtp}` : 'Code OTP envoyé');
+    });
+});
+
+function showAuthError(id, msg) {
+    $(id).textContent = msg;
+    const siblingSuccess = id === 'registerError' ? $('registerSuccess') : id === 'resetError' ? $('resetSuccess') : null;
+    if (siblingSuccess) siblingSuccess.textContent = '';
+    setTimeout(() => $(id).textContent = '', 3500);
+}
 function togglePw(id) {
     const inp = $(id);
     inp.type = inp.type === 'password' ? 'text' : 'password';
@@ -341,27 +447,75 @@ function onAuthSuccess(res) {
     statuses      = res.statuses || [];
     updateChannelInfo = res.updateChannel || null;
     authSessionToken = res.sessionToken || null;
+    if (authSessionToken && currentUser?.pseudo) {
+        persistSessionAuth({ pseudo: currentUser.pseudo, token: authSessionToken });
+    }
     seedKnownPrivateChats();
 
     updateSidebarUser();
     setupSocketListeners();
     setupReconnectHandler();
+    $('authScreen')?.classList.remove('restoring');
     playAuthLaunch().then(() => {
         $('authScreen').style.display = 'none';
         $('mainScreen').style.display = 'flex';
         renderStatusStrip();
         renderUpdateChannelPrompt();
         renderConversations();
+        renderCallsHistory();
+        // Init new UI
+        initMobileUI();
+        initSettingsPage();
+        initActusPage();
         if (currentUser.needsPhoneSetup) {
             showToast('Ajoutez votre numero principal dans le profil pour activer les statuts prives');
         }
+        flushPendingRegistrationAvatar();
     });
 }
 
 function updateSidebarUser() {
-    $('sidebarUserAvatar').src = currentUser.avatar;
-    $('drawerAvatar').src      = currentUser.avatar;
-    $('drawerPseudo').textContent = currentUser.pseudo;
+    if ($('sidebarUserAvatar')) $('sidebarUserAvatar').src = currentUser.avatar;
+    if ($('drawerAvatar'))      $('drawerAvatar').src      = currentUser.avatar;
+    if ($('drawerPseudo'))      $('drawerPseudo').textContent = currentUser.pseudo;
+    if ($('drawerStatus'))      $('drawerStatus').textContent = currentUser.online ? 'En ligne' : lastSeenText(currentUser.lastSeen);
+    // Mobile: update actus avatar
+    if ($('actusMyAvatar'))     $('actusMyAvatar').src = currentUser.avatar;
+    // Admin-only elements
+    const isAdmin = currentUser.isAdmin;
+    document.querySelectorAll('.admin-only').forEach(el => {
+        el.style.display = isAdmin ? '' : 'none';
+    });
+}
+
+function readStoredSession() {
+    try {
+        const raw = sessionStorage.getItem('devchat_auth');
+        const fallback = localStorage.getItem('devchat_auth');
+        const parsed = JSON.parse(raw || fallback || 'null');
+        if (!parsed?.pseudo || !parsed?.token) return null;
+        return parsed;
+    } catch (err) {
+        clearSessionAuth();
+        return null;
+    }
+}
+
+function restoreSessionWithToken(onSuccess) {
+    const stored = readStoredSession();
+    if (!stored) return false;
+    $('authScreen')?.classList.add('restoring');
+    socket.emit('auth', { pseudo: stored.pseudo, sessionToken: stored.token, isRegister: false }, (res) => {
+        $('authScreen')?.classList.remove('restoring');
+        if (!res?.success) {
+            clearSessionAuth();
+            if (currentUser) showToast('Session expirée — veuillez vous reconnecter');
+            return;
+        }
+        if (typeof onSuccess === 'function') onSuccess(res);
+        else onAuthSuccess(res);
+    });
+    return true;
 }
 
 function formatPhoneNumber(value) {
@@ -370,33 +524,44 @@ function formatPhoneNumber(value) {
 }
 
 function renderUpdateChannelPrompt() {
-    const prompt = $('updateChannelPrompt');
-    if (!updateChannelInfo || updateChannelInfo.joined) {
-        prompt.style.display = 'none';
-        return;
-    }
-    prompt.style.display = 'flex';
+    const show = updateChannelInfo && !updateChannelInfo.joined;
+    ['updateChannelPrompt','updateChannelPromptMobile'].forEach(id => {
+        const el = $(id);
+        if (el) el.style.display = show ? 'flex' : 'none';
+    });
 }
 
-$('joinUpdateChannelBtn').addEventListener('click', () => {
+function joinUpdateChannel() {
     socket.emit('join-update-channel', (res) => {
         if (!res?.success) return showToast(res?.error || 'Erreur');
         if (res.group) upsertGroup(res.group);
         updateChannelInfo = res.updateChannel || updateChannelInfo;
         renderUpdateChannelPrompt();
         renderConversations();
-        showToast('Canal de mises a jour rejoint');
+        showToast('Canal de mises à jour rejoint ✓');
     });
-});
+}
+$('joinUpdateChannelBtn').addEventListener('click', joinUpdateChannel);
+const mobileJoinBtn = $('joinUpdateChannelBtnMobile');
+if (mobileJoinBtn) mobileJoinBtn.addEventListener('click', joinUpdateChannel);
 
 function playAuthLaunch() {
-    const launch = $('authLaunch');
-    launch.classList.add('active');
     return new Promise(resolve => {
+        const launch = $('authLaunch');
+        if (!launch) { resolve(); return; }
+        // Show splash with .active class
+        launch.classList.add('active');
+        // After animation completes, fade out and resolve
         setTimeout(() => {
-            launch.classList.remove('active');
-            resolve();
-        }, 1250);
+            launch.style.transition = 'opacity 0.3s ease';
+            launch.style.opacity = '0';
+            setTimeout(() => {
+                launch.style.display = 'none';
+                launch.style.opacity = '';
+                launch.classList.remove('active');
+                resolve();
+            }, 320);
+        }, 1300);
     });
 }
 
@@ -512,12 +677,12 @@ function renderStatusStrip() {
 
     const ownGroup = groupedStatuses().find(group => group.userPseudo === currentUser.pseudo);
     const ownItem = document.createElement('div');
-    ownItem.className = 'status-item';
+    ownItem.className = 'status-strip-item';
     ownItem.innerHTML = `
-        <div class="status-avatar-wrap own">
+        <div class="status-ring-strip ${ownGroup ? 'has-status' : ''}">
             <img src="${currentUser.avatar}" alt="">
         </div>
-        <div class="status-name">${ownGroup ? 'Mon statut' : 'Ajouter'}</div>
+        <span>${ownGroup ? 'Mon statut' : 'Ajouter'}</span>
     `;
     ownItem.addEventListener('click', openStatusComposerModal);
     strip.appendChild(ownItem);
@@ -528,12 +693,12 @@ function renderStatusStrip() {
             const user = allUsers.find(item => item.pseudo === group.userPseudo);
             const allViewed = group.items.every(item => item.viewed);
             const div = document.createElement('div');
-            div.className = 'status-item';
+            div.className = 'status-strip-item';
             div.innerHTML = `
-                <div class="status-avatar-wrap ${allViewed ? 'viewed' : ''}">
+                <div class="status-ring-strip ${allViewed ? '' : 'has-status'}">
                     <img src="${user?.avatar || dicebear(group.userPseudo)}" alt="">
                 </div>
-                <div class="status-name">${escHtml(group.userPseudo)}</div>
+                <span>${escHtml(group.userPseudo)}</span>
             `;
             div.addEventListener('click', () => openStatusViewer(group.userPseudo));
             strip.appendChild(div);
@@ -657,6 +822,7 @@ function renderConversations(filter = '') {
     });
 
     let displayed = 0;
+    const renderedEntries = [];
     sorted.forEach(entry => {
         const name = entry.type === 'group'
             ? (groups.find(g => g.id === entry.id)?.name || entry.id)
@@ -689,13 +855,13 @@ function renderConversations(filter = '') {
                 <img src="${avatar}" class="conv-avatar" alt="">
                 <span class="conv-online-dot ${isOnline ? 'show' : ''}"></span>
             </div>
-            <div class="conv-content">
-                <div class="conv-top">
+            <div class="conv-info">
+                <div class="conv-name-row">
                     <span class="conv-name">${escHtml(name)}</span>
                     <span class="conv-time">${lastTime}</span>
                 </div>
-                <div class="conv-bottom">
-                    <span class="conv-last">${isOwn && !unread ? '<i class="fas fa-check-double conv-sent-icon"></i> ' : ''}${escHtml(lastTxt)}</span>
+                <div class="conv-msg-row">
+                    <span class="conv-last-msg">${isOwn && !unread ? '<i class="fas fa-check-double conv-sent-check"></i> ' : ''}${escHtml(lastTxt)}</span>
                     ${unread > 0 ? `<span class="conv-badge">${unread}</span>` : ''}
                 </div>
             </div>
@@ -704,11 +870,39 @@ function renderConversations(filter = '') {
             openChat({ type: entry.type, id: entry.id, name, avatar });
         });
         list.appendChild(div);
+        renderedEntries.push(entry);
         displayed++;
     });
 
     if (displayed === 0) {
         list.innerHTML = `<div class="empty-state"><i class="fas fa-comments"></i><p>Aucune conversation</p><small>Recherchez un utilisateur pour commencer</small></div>`;
+    }
+
+    // Mirror to mobile list
+    const mobileList = $('conversationsListMobile');
+    if (mobileList) mobileList.innerHTML = list.innerHTML;
+
+    // Update tab badge
+    const totalUnread = [...chatMap.values()].reduce((s, e) => s + (e.unread || 0), 0);
+    const badge = $('tabBadgeDiscussions');
+    if (badge) {
+        badge.textContent = totalUnread > 99 ? '99+' : totalUnread;
+        badge.style.display = totalUnread > 0 ? 'block' : 'none';
+    }
+
+    // Add click handlers to mobile items too
+    if (mobileList) {
+        mobileList.querySelectorAll('.conv-item').forEach((el, i) => {
+            const entry2 = renderedEntries[i];
+            if (!entry2) return;
+            const name2 = entry2.type === 'group'
+                ? (groups.find(g => g.id === entry2.id)?.name || entry2.id)
+                : entry2.id;
+            const user2  = allUsers.find(u => u.pseudo === entry2.id);
+            const group2 = groups.find(g => g.id === entry2.id);
+            const avatar2 = entry2.type === 'group' ? (group2?.avatar || dicebear(name2)) : (user2?.avatar || dicebear(name2));
+            el.addEventListener('click', () => openChat({ type: entry2.type, id: entry2.id, name: name2, avatar: avatar2 }));
+        });
     }
 }
 
@@ -718,6 +912,10 @@ function renderConversations(filter = '') {
 function openChat(chat) {
     if (chat.type === 'private') registerPrivateChat(chat.id, chat.avatar);
     currentChat = chat;
+    // Mobile: open chat overlay
+    if (window.innerWidth <= 768) {
+        $('chatArea').classList.add('open');
+    }
     cancelReply();
 
     // Mobile: hide sidebar
@@ -891,6 +1089,7 @@ function buildMessageEl(msg) {
             if (msg.content) bubble.appendChild(document.createTextNode(msg.content));
         } else if (isAudio) {
             const audio = document.createElement('audio');
+            audio.className = 'msg-audio';
             audio.controls = true;
             audio.src = msg.fileUrl;
             bubble.appendChild(audio);
@@ -898,7 +1097,14 @@ function buildMessageEl(msg) {
         } else {
             const fileDiv = document.createElement('div');
             fileDiv.className = 'msg-file';
-            fileDiv.innerHTML = `<i class="fas fa-file"></i><a href="${msg.fileUrl}" download="${escHtml(msg.fileName || 'fichier')}">${escHtml(msg.fileName || 'Fichier')}</a>`;
+            const icon = document.createElement('i');
+            icon.className = 'fas fa-file';
+            const link = document.createElement('a');
+            link.href = msg.fileUrl;
+            link.download = msg.fileName || 'fichier';
+            link.textContent = msg.fileName || 'Fichier';
+            fileDiv.appendChild(icon);
+            fileDiv.appendChild(link);
             bubble.appendChild(fileDiv);
         }
     } else {
@@ -1166,7 +1372,7 @@ document.addEventListener('click', (e) => {
         $('emojiPickerContainer').style.display = 'none';
 });
 
-$('voiceBtn').addEventListener('click', async () => {
+$('voiceRecordBtn').addEventListener('click', async () => {
     if (isReadonlyOfficialChannel()) {
         showToast('Seul l administrateur peut publier dans ce canal');
         return;
@@ -1184,8 +1390,8 @@ $('voiceBtn').addEventListener('click', async () => {
         const recorderOptions = MediaRecorder.isTypeSupported?.('audio/webm') ? { mimeType: 'audio/webm' } : undefined;
         mediaRecorder = recorderOptions ? new MediaRecorder(mediaRecorderStream, recorderOptions) : new MediaRecorder(mediaRecorderStream);
         isRecording = true;
-        $('voiceBtn').classList.add('recording');
-        $('voiceBtn').innerHTML = '<i class="fas fa-stop"></i>';
+        $('voiceRecordBtn').classList.add('recording');
+        $('voiceRecordBtn').innerHTML = '<i class="fas fa-stop"></i>';
         $('messageInput').placeholder = 'Enregistrement vocal...';
         updateComposerActionButtons();
 
@@ -1195,8 +1401,8 @@ $('voiceBtn').addEventListener('click', async () => {
 
         mediaRecorder.addEventListener('stop', async () => {
             isRecording = false;
-            $('voiceBtn').classList.remove('recording');
-            $('voiceBtn').innerHTML = '<i class="fas fa-microphone"></i>';
+            $('voiceRecordBtn').classList.remove('recording');
+            $('voiceRecordBtn').innerHTML = '<i class="fas fa-microphone"></i>';
             $('messageInput').placeholder = isReadonlyOfficialChannel() ? 'Canal officiel en lecture seule' : 'Message...';
             stopVoiceStream();
             const blob = new Blob(chunks, { type: mediaRecorder.mimeType || 'audio/webm' });
@@ -1222,8 +1428,8 @@ $('voiceBtn').addEventListener('click', async () => {
         isRecording = false;
         mediaRecorder = null;
         stopVoiceStream();
-        $('voiceBtn').classList.remove('recording');
-        $('voiceBtn').innerHTML = '<i class="fas fa-microphone"></i>';
+        $('voiceRecordBtn').classList.remove('recording');
+        $('voiceRecordBtn').innerHTML = '<i class="fas fa-microphone"></i>';
         $('messageInput').placeholder = isReadonlyOfficialChannel() ? 'Canal officiel en lecture seule' : 'Message...';
         updateComposerActionButtons();
         showToast('Microphone indisponible');
@@ -1257,29 +1463,14 @@ $('sidebarSearch').addEventListener('input', (e) => {
             results.forEach(u => {
                 const div = document.createElement('div');
                 div.className = 'search-result-item';
-                const alreadyInContacts = currentUser?.contacts?.includes(u.phoneNumber);
                 div.innerHTML = `
-                    <img src="${u.avatar}" class="ri-avatar" alt="">
+                    <img src="${u.avatar || dicebear(u.pseudo)}" class="ri-avatar" alt="">
                     <div class="ri-info">
                         <div class="ri-name">${escHtml(u.pseudo)}</div>
-                        <div class="ri-sub">${escHtml(formatPhoneNumber(u.phoneNumber))}</div>
+                        <div class="ri-sub">${escHtml(maskPhoneNumber(u.maskedPhoneNumber || ''))}</div>
                         <div class="ri-sub">${u.online ? 'En ligne' : lastSeenText(u.lastSeen)}</div>
                     </div>
-                    ${u.phoneNumber
-                        ? `<button class="btn-secondary search-add-contact-btn" ${alreadyInContacts ? 'disabled' : ''}>${alreadyInContacts ? 'Ajouté' : 'Ajouter'}</button>`
-                        : ''
-                    }
                 `;
-                const addBtn = div.querySelector('.search-add-contact-btn');
-                if (addBtn && !alreadyInContacts) {
-                    addBtn.addEventListener('click', (event) => {
-                        event.stopPropagation();
-                        addContactByPhone(u.phoneNumber, () => {
-                            addBtn.textContent = 'Ajouté';
-                            addBtn.disabled = true;
-                        });
-                    });
-                }
                 div.addEventListener('click', () => {
                     $('sidebarSearch').value = '';
                     $('searchResultsPanel').style.display = 'none';
@@ -1331,16 +1522,31 @@ $('deleteSelectedMessagesBtn').addEventListener('click', () => {
 //  DRAWER / MENU
 // ═══════════════════════════════════════════════════════════════
 $('menuBtn').addEventListener('click', () => {
-    $('drawer').classList.add('open');
-    $('drawerOverlay').classList.add('show');
+    toggleDrawer();
 });
 $('drawerOverlay').addEventListener('click', closeDrawer);
+if ($('drawerCloseBtn')) $('drawerCloseBtn').addEventListener('click', closeDrawer);
+function openDrawer() {
+    $('drawer').classList.add('open');
+    $('drawerOverlay').classList.add('show');
+    $('topbarCtxMenu')?.classList.remove('open');
+}
 function closeDrawer() {
     $('drawer').classList.remove('open');
     $('drawerOverlay').classList.remove('show');
 }
+function toggleDrawer() {
+    if ($('drawer').classList.contains('open')) closeDrawer();
+    else openDrawer();
+}
 
-function openDrawerSection(section) {
+document.querySelectorAll('.drawer-nav a').forEach(link => {
+    link.addEventListener('click', (event) => {
+        event.preventDefault();
+    });
+});
+
+function _legacyOpenDrawerSection(section) {
     closeDrawer();
     if (section === 'profile') openProfileModal();
     else if (section === 'explore') openExploreModal();
@@ -1350,13 +1556,253 @@ function openDrawerSection(section) {
 
 $('logoutBtn').addEventListener('click', () => {
     authSessionToken = null;
+    clearSessionAuth();
     socket.disconnect();
     location.reload();
 });
 
+function renderCallsHistory() {
+    const list = $('callsList');
+    if (!list) return;
+    if (!callHistory.length) {
+        list.innerHTML = `
+            <div class="actus-empty-state">
+                <i class="fas fa-phone-slash"></i>
+                <p>Aucun appel récent</p>
+                <small>Lancez un appel audio ou vidéo depuis un chat privé.</small>
+            </div>
+        `;
+        return;
+    }
+
+    list.innerHTML = '';
+    callHistory.slice(0, 12).forEach(entry => {
+        const row = document.createElement('div');
+        row.className = 'call-item';
+        row.innerHTML = `
+            <img src="${entry.avatar || dicebear(entry.pseudo)}" class="call-item-av" alt="">
+            <div class="call-item-info">
+                <div class="call-item-name">${escHtml(entry.pseudo)}</div>
+                <div class="call-item-detail">${entry.direction === 'incoming' ? 'Reçu' : 'Sortant'} · ${entry.mode === 'video' ? 'Vidéo' : 'Audio'} · ${escHtml(entry.status)}</div>
+            </div>
+            <span class="call-item-detail">${formatTime(entry.date)}</span>
+        `;
+        row.addEventListener('click', () => openChat({ type: 'private', id: entry.pseudo, name: entry.pseudo, avatar: entry.avatar || dicebear(entry.pseudo) }));
+        list.appendChild(row);
+    });
+}
+
+function pushCallHistory(entry) {
+    callHistory.unshift({
+        pseudo: entry.pseudo,
+        avatar: entry.avatar || '',
+        mode: entry.mode === 'video' ? 'video' : 'audio',
+        direction: entry.direction === 'incoming' ? 'incoming' : 'outgoing',
+        status: entry.status || 'Terminé',
+        date: new Date().toISOString()
+    });
+    callHistory = callHistory.slice(0, 25);
+    renderCallsHistory();
+}
+
+function updateCallControls() {
+    const call = activeCall || pendingIncomingCall;
+    const status = $('callStatusText');
+    if (status) status.textContent = call?.status || 'Connexion...';
+    if ($('callPeerName')) $('callPeerName').textContent = call?.name || call?.pseudo || 'Appel';
+    if ($('callRemoteAvatar')) $('callRemoteAvatar').src = call?.avatar || dicebear(call?.pseudo || 'DevChat');
+    if ($('callAcceptBtn')) $('callAcceptBtn').style.display = pendingIncomingCall ? 'inline-flex' : 'none';
+    if ($('callToggleCameraBtn')) $('callToggleCameraBtn').style.display = call?.mode === 'video' ? 'inline-flex' : 'none';
+    if ($('callMuteBtn')) $('callMuteBtn').style.display = activeCall ? 'inline-flex' : 'none';
+    if ($('callLocalVideo')) $('callLocalVideo').style.display = activeCall?.mode === 'video' && activeCall?.localStream ? 'block' : 'none';
+    if ($('callRemoteVideo')) $('callRemoteVideo').style.display = activeCall?.remoteStream && activeCall.remoteStream.getTracks().length ? 'block' : 'none';
+    if ($('callRemotePlaceholder')) $('callRemotePlaceholder').style.display = $('callRemoteVideo').style.display === 'block' ? 'none' : 'flex';
+}
+
+function openCallModal() {
+    $('callModal').style.display = 'flex';
+    document.body.classList.add('call-open');
+    updateCallControls();
+}
+
+function closeCallModal() {
+    $('callModal').style.display = 'none';
+    document.body.classList.remove('call-open');
+}
+
+function attachCallStreams() {
+    const localVideo = $('callLocalVideo');
+    const remoteVideo = $('callRemoteVideo');
+    if (localVideo) localVideo.srcObject = activeCall?.localStream || null;
+    if (remoteVideo) remoteVideo.srcObject = activeCall?.remoteStream || null;
+    updateCallControls();
+}
+
+async function ensureCallMedia(mode) {
+    const constraints = mode === 'video' ? { audio: true, video: true } : { audio: true, video: false };
+    return navigator.mediaDevices.getUserMedia(constraints);
+}
+
+function cleanupCallMedia(stream) {
+    if (!stream) return;
+    stream.getTracks().forEach(track => track.stop());
+}
+
+function resetActiveCallState() {
+    if (activeCall?.pc) {
+        activeCall.pc.onicecandidate = null;
+        activeCall.pc.ontrack = null;
+        activeCall.pc.close();
+    }
+    cleanupCallMedia(activeCall?.localStream);
+    cleanupCallMedia(activeCall?.remoteStream);
+    activeCall = null;
+    pendingIncomingCall = null;
+    const localVideo = $('callLocalVideo');
+    const remoteVideo = $('callRemoteVideo');
+    if (localVideo) localVideo.srcObject = null;
+    if (remoteVideo) remoteVideo.srcObject = null;
+    closeCallModal();
+}
+
+function createPeerConnection(call) {
+    if (call.pc) return call.pc;
+    const pc = new RTCPeerConnection({
+        iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }]
+    });
+    call.remoteStream = new MediaStream();
+    pc.ontrack = event => {
+        event.streams[0].getTracks().forEach(track => call.remoteStream.addTrack(track));
+        attachCallStreams();
+        call.status = 'Connecté';
+        updateCallControls();
+    };
+    pc.onicecandidate = event => {
+        if (!event.candidate) return;
+        socket.emit('call-signal', {
+            to: call.pseudo,
+            data: { type: 'ice', candidate: event.candidate }
+        });
+    };
+    call.localStream.getTracks().forEach(track => pc.addTrack(track, call.localStream));
+    call.pc = pc;
+    attachCallStreams();
+    return pc;
+}
+
+async function startPeerOffer() {
+    if (!activeCall) return;
+    const pc = createPeerConnection(activeCall);
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    socket.emit('call-signal', {
+        to: activeCall.pseudo,
+        data: { type: 'offer', sdp: offer }
+    });
+}
+
+async function startCall(mode) {
+    if (!currentChat || currentChat.type !== 'private') {
+        showToast('Les appels ne sont disponibles que dans les chats privés');
+        return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia || !window.RTCPeerConnection) {
+        showToast('Appels non supportés sur cet appareil');
+        return;
+    }
+    if (activeCall || pendingIncomingCall) {
+        showToast('Un appel est déjà en cours');
+        return;
+    }
+
+    try {
+        const localStream = await ensureCallMedia(mode);
+        activeCall = {
+            pseudo: currentChat.id,
+            name: currentChat.name,
+            avatar: currentChat.avatar,
+            mode,
+            direction: 'outgoing',
+            status: `Appel ${mode === 'video' ? 'vidéo' : 'audio'} en cours...`,
+            localStream,
+            remoteStream: null,
+            pc: null,
+            muted: false
+        };
+        openCallModal();
+        attachCallStreams();
+        socket.emit('call-user', { to: currentChat.id, mode }, (res) => {
+            if (!res?.success) {
+                showToast(res?.error || 'Appel impossible');
+                pushCallHistory({ pseudo: currentChat.id, avatar: currentChat.avatar, mode, direction: 'outgoing', status: 'Échec' });
+                resetActiveCallState();
+            }
+        });
+    } catch (err) {
+        showToast(mode === 'video' ? 'Caméra ou micro indisponible' : 'Microphone indisponible');
+    }
+}
+
+async function acceptIncomingCall() {
+    if (!pendingIncomingCall) return;
+    try {
+        const localStream = await ensureCallMedia(pendingIncomingCall.mode);
+        activeCall = {
+            ...pendingIncomingCall,
+            direction: 'incoming',
+            status: 'Connexion...',
+            localStream,
+            remoteStream: null,
+            pc: null,
+            muted: false
+        };
+        pendingIncomingCall = null;
+        openCallModal();
+        attachCallStreams();
+        socket.emit('call-response', { to: activeCall.pseudo, accepted: true, mode: activeCall.mode });
+    } catch (err) {
+        showToast('Impossible d’accéder au micro/caméra');
+        declineIncomingCall('Accès refusé');
+    }
+}
+
+function declineIncomingCall(reason = 'Refusé') {
+    if (!pendingIncomingCall) return;
+    socket.emit('call-response', { to: pendingIncomingCall.pseudo, accepted: false, mode: pendingIncomingCall.mode, reason });
+    pushCallHistory({
+        pseudo: pendingIncomingCall.pseudo,
+        avatar: pendingIncomingCall.avatar,
+        mode: pendingIncomingCall.mode,
+        direction: 'incoming',
+        status: reason
+    });
+    pendingIncomingCall = null;
+    closeCallModal();
+}
+
+function endCurrentCall(reason = 'Terminé') {
+    if (pendingIncomingCall) return declineIncomingCall(reason);
+    if (!activeCall) return closeCallModal();
+    socket.emit('end-call', { to: activeCall.pseudo, reason });
+    pushCallHistory({
+        pseudo: activeCall.pseudo,
+        avatar: activeCall.avatar,
+        mode: activeCall.mode,
+        direction: activeCall.direction,
+        status: reason
+    });
+    resetActiveCallState();
+}
+
 // ── Header buttons ─────────────────────────────────────────────
 $('newChatBtn').addEventListener('click', () => {
     $('sidebarSearch').focus();
+});
+$('chatCallBtn').addEventListener('click', () => {
+    startCall('audio');
+});
+$('chatVideoBtn').addEventListener('click', () => {
+    startCall('video');
 });
 $('chatMoreBtn').addEventListener('click', (e) => {
     e.stopPropagation();
@@ -1433,7 +1879,25 @@ function closeContextMenu() { $('chatContextMenu').classList.remove('open'); }
 $('backBtn').addEventListener('click', () => {
     if (!currentChat) return;
     $('sidebar').classList.remove('hidden');
+    $('chatArea').classList.remove('open');
     closeChatArea();
+});
+$('callAcceptBtn').addEventListener('click', acceptIncomingCall);
+$('callDeclineBtn').addEventListener('click', () => endCurrentCall('Terminé'));
+$('callMuteBtn').addEventListener('click', () => {
+    if (!activeCall?.localStream) return;
+    const audioTrack = activeCall.localStream.getAudioTracks()[0];
+    if (!audioTrack) return;
+    audioTrack.enabled = !audioTrack.enabled;
+    activeCall.muted = !audioTrack.enabled;
+    $('callMuteBtn').classList.toggle('active', activeCall.muted);
+});
+$('callToggleCameraBtn').addEventListener('click', () => {
+    if (!activeCall?.localStream) return;
+    const videoTrack = activeCall.localStream.getVideoTracks()[0];
+    if (!videoTrack) return;
+    videoTrack.enabled = !videoTrack.enabled;
+    $('callToggleCameraBtn').classList.toggle('active', !videoTrack.enabled);
 });
 
 function closeChatArea() {
@@ -1500,9 +1964,7 @@ $('groupAvatarFile').addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file) return;
     try {
-        const fd = new FormData();
-        fd.append('avatar', file);
-        const data = await apiFetch('/api/upload-avatar', { method: 'POST', body: fd });
+        const data = await uploadAvatarFile(file);
         groupAvatarUrl = data.avatarUrl;
         $('groupAvatarPreview').innerHTML = `<img src="${groupAvatarUrl}" alt="">`;
     } catch (err) {
@@ -1625,6 +2087,8 @@ window.removeContact = removeContact;
 function openProfileModal() {
     $('profileAvatar').src = currentUser.avatar;
     $('profilePseudo').textContent = currentUser.pseudo;
+    $('profileEmail').value = currentUser.email || '';
+    $('profileEmailHint').textContent = currentUser.emailVerified ? 'Email vérifié pour récupération OTP.' : 'Ajoutez un email valide pour la récupération de compte.';
     $('profileBio').value = currentUser.bio || '';
     $('profileCountryCode').value = currentUser.phoneCountryCode || '+242';
     $('profilePhoneNumber').value = currentUser.phoneLocalNumber || '';
@@ -1650,8 +2114,7 @@ $('profileAvatarFile').addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file) return;
     try {
-        const fd = new FormData(); fd.append('avatar', file);
-        const data = await apiFetch('/api/upload-avatar', { method: 'POST', body: fd });
+        const data = await uploadAvatarFile(file);
         $('profileAvatar').src = data.avatarUrl;
         currentUser.avatar = data.avatarUrl;
     } catch (err) {
@@ -1659,9 +2122,12 @@ $('profileAvatarFile').addEventListener('change', async (e) => {
     }
 });
 $('saveProfileBtn').addEventListener('click', () => {
+    const email = $('profileEmail').value.trim();
+    if (!isValidEmail(email)) return showToast('Email invalide');
     socket.emit('update-profile', {
         avatar: currentUser.avatar,
         bio: $('profileBio').value,
+        email,
         countryCode: $('profileCountryCode').value,
         phoneNumber: $('profilePhoneNumber').value.trim()
     }, (res) => {
@@ -1743,9 +2209,7 @@ $('manageGroupAvatarFile').addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file) return;
     try {
-        const fd = new FormData();
-        fd.append('avatar', file);
-        const data = await apiFetch('/api/upload-avatar', { method: 'POST', body: fd });
+        const data = await uploadAvatarFile(file);
         manageGroupAvatarUrl = data.avatarUrl;
         $('manageGroupAvatarPreview').innerHTML = `<img src="${manageGroupAvatarUrl}" alt="">`;
     } catch (err) {
@@ -1812,7 +2276,7 @@ function openRightPanel() {
                 <h3>${escHtml(currentChat.name)}</h3>
                 <p>${escHtml(user?.bio || 'Aucune bio')}</p>
             </div>
-            <div class="rp-info-row"><i class="fas fa-circle" style="color:${user?.online ? 'var(--success)' : 'var(--text3)'}"></i><span>${user?.online ? 'En ligne' : lastSeenText(user?.lastSeen)}</span></div>
+            <div class="rp-info-row"><i class="fas fa-circle" style="color:${user?.online ? 'var(--success)' : 'var(--text-light)'}"></i><span>${user?.online ? 'En ligne' : lastSeenText(user?.lastSeen)}</span></div>
             <div class="rp-info-row"><i class="fas fa-calendar"></i><span>Membre depuis ${user?.createdAt ? new Date(user.createdAt).toLocaleDateString('fr-FR') : '-'}</span></div>
         `;
     } else {
@@ -1823,7 +2287,7 @@ function openRightPanel() {
                 <img src="${currentChat.avatar}" alt="">
                 <h3>${escHtml(currentChat.name)}</h3>
                 <p>${escHtml(group?.description || 'Groupe DevChat')}</p>
-                <p style="margin-top:6px;font-size:12px;color:var(--text3)">${group?.isPublic ? '🌐 Groupe public' : '🔒 Groupe privé'}</p>
+                <p style="margin-top:6px;font-size:12px;color:var(--text-light)">${group?.isPublic ? '🌐 Groupe public' : '🔒 Groupe privé'}</p>
             </div>
             <div class="rp-info-row"><i class="fas fa-users"></i><span>${group?.members.length || 0} membres</span></div>
             <div class="rp-members-title">Membres</div>
@@ -2211,6 +2675,77 @@ function setupSocketListeners() {
         renderStatusStrip();
         if ($('statusComposerModal').classList.contains('open')) renderMyStatuses();
     });
+
+    socket.on('incoming-call', ({ from, mode, avatar }) => {
+        if (activeCall || pendingIncomingCall) {
+            socket.emit('call-response', { to: from, accepted: false, mode, reason: 'Occupé' });
+            return;
+        }
+        const user = allUsers.find(item => item.pseudo === from);
+        pendingIncomingCall = {
+            pseudo: from,
+            name: user?.pseudo || from,
+            avatar: avatar || user?.avatar || dicebear(from),
+            mode: mode === 'video' ? 'video' : 'audio',
+            status: `${mode === 'video' ? 'Appel vidéo' : 'Appel audio'} entrant`
+        };
+        openCallModal();
+    });
+
+    socket.on('call-response', async ({ from, accepted, mode, reason }) => {
+        if (!activeCall || activeCall.pseudo !== from) return;
+        if (!accepted) {
+            showToast(reason || 'Appel refusé');
+            pushCallHistory({ pseudo: from, avatar: activeCall.avatar, mode: activeCall.mode, direction: 'outgoing', status: reason || 'Refusé' });
+            resetActiveCallState();
+            return;
+        }
+        activeCall.status = mode === 'video' ? 'Connexion vidéo...' : 'Connexion audio...';
+        updateCallControls();
+        try {
+            await startPeerOffer();
+        } catch (err) {
+            showToast('Échec de connexion de l’appel');
+            endCurrentCall('Échec');
+        }
+    });
+
+    socket.on('call-signal', async ({ from, data }) => {
+        if (!activeCall || activeCall.pseudo !== from || !data) return;
+        try {
+            const pc = createPeerConnection(activeCall);
+            if (data.type === 'offer' && data.sdp) {
+                await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+                socket.emit('call-signal', { to: from, data: { type: 'answer', sdp: answer } });
+            } else if (data.type === 'answer' && data.sdp) {
+                await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+            } else if (data.type === 'ice' && data.candidate) {
+                await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+            }
+        } catch (err) {
+            showToast('Signal d’appel invalide');
+            endCurrentCall('Échec');
+        }
+    });
+
+    socket.on('call-ended', ({ from, reason }) => {
+        const relatedCall = activeCall && activeCall.pseudo === from;
+        const relatedPending = pendingIncomingCall && pendingIncomingCall.pseudo === from;
+        if (!relatedCall && !relatedPending) return;
+        if (activeCall) {
+            pushCallHistory({
+                pseudo: activeCall.pseudo,
+                avatar: activeCall.avatar,
+                mode: activeCall.mode,
+                direction: activeCall.direction,
+                status: reason || 'Terminé'
+            });
+        }
+        showToast(reason || 'Appel terminé');
+        resetActiveCallState();
+    });
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -2298,6 +2833,12 @@ function pruneExpiredState() {
 setInterval(pruneExpiredState, 5000);
 
 if ('serviceWorker' in navigator) {
+    if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') {
+        navigator.serviceWorker.getRegistrations().then(registrations => registrations.forEach(registration => registration.unregister()));
+        if ('caches' in window) caches.keys().then(keys => keys.forEach(key => caches.delete(key)));
+    } else {
+        navigator.serviceWorker.register('/sw.js').catch(() => {});
+    }
     navigator.serviceWorker.addEventListener('message', event => {
         if (event.data?.type !== 'open-chat') return;
         const { chatType, chatId } = event.data;
@@ -2368,31 +2909,32 @@ function setupReconnectHandler() {
         // Si on était déjà connecté (reconnexion), restaurer la session
         if (currentUser) {
             console.log('[Socket] Restauration session pour:', currentUser.pseudo);
-            const stored = sessionStorage.getItem('devchat_auth');
-            if (!stored) return;
-            const { pseudo, password } = JSON.parse(stored);
+            restoreSessionWithToken((res) => {
+                currentUser   = res.user;
+                groups        = res.groups   || groups;
+                allUsers      = res.users    || allUsers;
+                statuses      = res.statuses || statuses;
+                updateChannelInfo = res.updateChannel || updateChannelInfo;
+                authSessionToken = res.sessionToken || authSessionToken;
+                persistSessionAuth({ pseudo: res.user?.pseudo, token: authSessionToken });
+                (res.messages || []).forEach(m => {
+                    if (!conversations.find(x => x.id === m.id)) conversations.push(m);
+                });
+                updateSidebarUser();
+                renderStatusStrip();
+                renderUpdateChannelPrompt();
+                renderConversations();
+                refreshActusPage();
+                if (currentChat) renderMessages();
+                showToast('✓ Reconnecté');
+            });
+            return;
+        }
 
-            socket.emit('auth', { pseudo, password, isRegister: false }, (res) => {
-                if (res.success) {
-                    // Mettre à jour les données sans réinitialiser l'UI
-                    currentUser   = res.user;
-                    groups        = res.groups   || groups;
-                    allUsers      = res.users    || allUsers;
-                    // Fusionner les nouveaux messages sans dupliquer
-                    (res.messages || []).forEach(m => {
-                        if (!messages.find(x => x.id === m.id)) messages.push(m);
-                    });
-                    renderConversationsList();
-                    // Recharger le chat ouvert si nécessaire
-                    if (currentChat) {
-                        renderMessages();
-                    }
-                    showToast('✓ Reconnecté');
-                } else {
-                    console.warn('[Socket] Échec restauration session:', res.error);
-                    showToast('Session expirée — veuillez vous reconnecter');
-                    setTimeout(() => location.reload(), 2000);
-                }
+        if (!currentUser && $('authScreen').style.display !== 'none') {
+            restoreSessionWithToken((res) => {
+                onAuthSuccess(res);
+                showToast('Session restaurée');
             });
         }
     });
@@ -2403,14 +2945,457 @@ function setupReconnectHandler() {
     });
 }
 
-// Sauvegarder les credentials en sessionStorage pour la reconnexion auto
-// (sessionStorage = effacé à la fermeture de l'onglet, pas persistant)
-const _origEmitAuth = socket.emit.bind(socket);
-socket.onAny((event, ...args) => {
-    if (event === 'auth' && args[0]?.password && !args[0]?.isRegister) {
-        sessionStorage.setItem('devchat_auth', JSON.stringify({
-            pseudo:   args[0].pseudo,
-            password: args[0].password
-        }));
+// ═══════════════════════════════════════════════════════════════
+//  NAVIGATION PAR ONGLETS (WhatsApp style)
+// ═══════════════════════════════════════════════════════════════
+function switchTab(pageId, btn) {
+    // Pages
+    document.querySelectorAll('.tab-page').forEach(p => p.classList.remove('active'));
+    const page = $(pageId);
+    if (page) page.classList.add('active');
+    // Buttons
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    if (btn) btn.classList.add('active');
+    // Topbar title
+    const titles = {
+        pageDiscussions: 'DevChat',
+        pageActus:       'Actus',
+        pageAppels:      'Appels',
+        pageParametres:  'Paramètres'
+    };
+    const topbar = $('topbarTitle');
+    if (topbar) topbar.textContent = titles[pageId] || 'DevChat';
+    if ($('mobileSearchBar')) $('mobileSearchBar').style.display = 'none';
+    if ($('appTopbar')) $('appTopbar').style.display = 'flex';
+    if ($('mobileSearch')) $('mobileSearch').value = '';
+    if ($('mobileSearchResultsPanel')) $('mobileSearchResultsPanel').style.display = 'none';
+    if ($('conversationsListMobile')) $('conversationsListMobile').style.display = 'flex';
+    // Page-specific refresh
+    if (pageId === 'pageActus')      refreshActusPage();
+    if (pageId === 'pageParametres') initSettingsPage();
+}
+window.switchTab = switchTab;
+
+// ═══════════════════════════════════════════════════════════════
+//  INIT MOBILE UI
+// ═══════════════════════════════════════════════════════════════
+function initMobileUI() {
+    if (window.__devchatMobileUIInitialized) return;
+    window.__devchatMobileUIInitialized = true;
+
+    // Topbar search
+    const searchBtn = $('topbarSearchBtn');
+    const searchBar = $('mobileSearchBar');
+    const searchBack= $('mobileSearchBack');
+    const searchInp = $('mobileSearch');
+    if (searchBtn) searchBtn.addEventListener('click', () => {
+        searchBar.style.display = 'flex';
+        $('appTopbar').style.display = 'none';
+        searchInp.focus();
+    });
+    if (searchBack) searchBack.addEventListener('click', () => {
+        searchBar.style.display = 'none';
+        $('appTopbar').style.display = 'flex';
+        searchInp.value = '';
+        $('mobileSearchResultsPanel').style.display = 'none';
+        $('conversationsListMobile').style.display  = 'flex';
+    });
+    if (searchInp) {
+        searchInp.addEventListener('input', e => {
+            const q = e.target.value.trim();
+            if (!q) {
+                $('mobileSearchResultsPanel').style.display = 'none';
+                $('conversationsListMobile').style.display  = 'flex';
+                return;
+            }
+            socket.emit('search-users', q, (results) => {
+                $('mobileSearchResultsPanel').style.display  = 'block';
+                $('conversationsListMobile').style.display   = 'none';
+                const list = $('mobileSearchResultsList');
+                list.innerHTML = '';
+                if (!results?.length) { list.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-gray)">Aucun résultat</div>'; return; }
+                results.forEach(u => {
+                    const d = document.createElement('div');
+                    d.className = 'search-result-item';
+                    d.innerHTML = `<img src="${u.avatar||dicebear(u.pseudo)}" alt=""><div><div class="sr-name">${escHtml(u.pseudo)}</div><div class="sr-sub">${escHtml(maskPhoneNumber(u.maskedPhoneNumber || ''))}</div><div class="sr-sub">${u.online?'En ligne':lastSeenText(u.lastSeen)}</div></div>`;
+                    d.addEventListener('click', () => {
+                        searchBar.style.display = 'none';
+                        $('appTopbar').style.display = 'flex';
+                        searchInp.value = '';
+                        $('mobileSearchResultsPanel').style.display = 'none';
+                        $('conversationsListMobile').style.display  = 'flex';
+                        openChat({ type:'private', id:u.pseudo, name:u.pseudo, avatar:u.avatar||dicebear(u.pseudo) });
+                    });
+                    list.appendChild(d);
+                });
+            });
+        });
     }
+
+    // Topbar more menu
+    const moreBtn = $('topbarMoreBtn');
+    const moreMenu= $('topbarCtxMenu');
+    if (moreBtn) moreBtn.addEventListener('click', e => { e.stopPropagation(); moreMenu.classList.toggle('open'); });
+
+    // FAB new chat → focus search
+    const fab = $('fabNewChat');
+    if (fab) fab.addEventListener('click', () => {
+        switchTab('pageDiscussions', document.querySelector('[data-tab="pageDiscussions"]'));
+        if (searchBtn) searchBtn.click();
+    });
+
+    // FAB status
+    const fabSt = $('fabStatus');
+    if (fabSt) fabSt.addEventListener('click', () => {
+        openStatusComposerModal();
+    });
+
+    // FAB call
+    const fabCall = $('fabCall');
+    if (fabCall) fabCall.addEventListener('click', () => {
+        if (!currentChat || currentChat.type !== 'private') {
+            switchTab('pageDiscussions', document.querySelector('[data-tab="pageDiscussions"]'));
+            showToast('Ouvrez un chat privé pour appeler');
+            return;
+        }
+        startCall('audio');
+    });
+
+    // Logout mobile
+    const logoutMobile = $('logoutBtnMobile');
+    if (logoutMobile) logoutMobile.addEventListener('click', () => {
+        if (confirm('Se déconnecter ?')) {
+            authSessionToken = null;
+            clearSessionAuth();
+            socket.disconnect();
+            location.reload();
+        }
+    });
+
+    // Mobile menu btn (opens drawer)
+    const mobileMenuBtn = $('mobileMenuBtn');
+    if (mobileMenuBtn) mobileMenuBtn.addEventListener('click', toggleDrawer);
+
+    // Camera btn
+    const camBtn = $('topbarCameraBtn');
+    if (camBtn) camBtn.addEventListener('click', () => openStatusComposerModal());
+
+    // Call create link
+    const callLink = $('callCreateLinkBtn');
+    if (callLink) callLink.addEventListener('click', () => {
+        if (!currentChat || currentChat.type !== 'private') {
+            showToast('Ouvrez un chat privé puis lancez un appel');
+            return;
+        }
+        startCall('video');
+    });
+
+    // Admin btn in menu
+    const adminBtn = $('adminMenuBtn');
+    if (adminBtn && currentUser?.isAdmin) { adminBtn.style.display = 'flex'; }
+
+    // Settings admin row
+    const sAdminBtn = $('settingsAdminBtn');
+    if (sAdminBtn && currentUser?.isAdmin) {
+        sAdminBtn.style.display = 'flex';
+        sAdminBtn.addEventListener('click', () => { if (typeof openAdminModal === 'function') openAdminModal(); });
+    }
+
+    // Settings rows handlers
+    const sp = $('settingsPrivacyBtn');
+    if (sp) sp.addEventListener('click', () => showToast('Paramètres de confidentialité — bientôt'));
+    const sn = $('settingsNotifBtn');
+    if (sn) sn.addEventListener('click', () => showToast('Paramètres de notifications — bientôt'));
+    const st = $('settingsThemeBtn');
+    if (st) st.addEventListener('click', () => openModal('settingsThemeModal'));
+    const ss = $('settingsStorageBtn');
+    if (ss) ss.addEventListener('click', () => showToast('Stockage et données — bientôt'));
+    const sh = $('settingsHelpBtn');
+    if (sh) sh.addEventListener('click', () => showToast('Centre d\'aide — bientôt'));
+
+    // Settings profile banner → profile modal
+    const banner = $('settingsProfileBanner');
+    if (banner) banner.addEventListener('click', () => openDrawerSection('profile'));
+
+    // Theme modal
+    initThemeModal();
+    // Actus page
+    initActusPage();
+    renderCallsHistory();
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  SETTINGS PAGE
+// ═══════════════════════════════════════════════════════════════
+function initSettingsPage() {
+    if (!currentUser) return;
+    const av = $('settingsAvatar'); if (av) av.src = currentUser.avatar;
+    const nm = $('settingsName');   if (nm) nm.textContent = currentUser.pseudo;
+    const ph = $('settingsPhone');  if (ph) ph.textContent = currentUser.phoneNumber || ((currentUser.phoneCountryCode || '') + ' ' + (currentUser.phoneLocalNumber || '')).trim() || 'Non renseigné';
+    const bi = $('settingsBio');    if (bi) bi.textContent = currentUser.bio || '';
+    const dot= $('settingsOnlineDot'); if (dot) dot.style.display = currentUser.online ? 'block' : 'none';
+    if (currentUser.isAdmin) {
+        const adminRow = $('settingsAdminBtn');
+        if (adminRow) { adminRow.style.display = 'flex'; adminRow.onclick = () => { if (typeof openAdminModal==='function') openAdminModal(); }; }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  ACTUS PAGE
+// ═══════════════════════════════════════════════════════════════
+function initActusPage() {
+    const myAv = $('actusMyAvatar');
+    if (myAv && currentUser) myAv.src = currentUser.avatar;
+    const myItem = $('actusMyItem');
+    if (myItem && !myItem.dataset.boundStatusOpen) {
+        myItem.dataset.boundStatusOpen = 'true';
+        myItem.addEventListener('click', () => {
+            openStatusComposerModal();
+        });
+    }
+    refreshActusPage();
+}
+
+function refreshActusPage() {
+    renderActusFriends();
+    renderActusChannels();
+    updateActusBadge();
+}
+
+function updateActusBadge() {
+    const badge = $('tabBadgeActus');
+    if (!badge || !currentUser) return;
+
+    const myContacts = currentUser.contacts || [];
+    const unseenContacts = new Set();
+    statuses.forEach(status => {
+        if (status.userPseudo === currentUser.pseudo) return;
+        const userPhone = allUsers.find(u => u.pseudo === status.userPseudo)?.phoneNumber;
+        const isVisible = myContacts.includes(userPhone) || myContacts.includes(status.userPseudo);
+        if (!isVisible) return;
+        if (!status.viewedBy?.includes(currentUser.pseudo)) unseenContacts.add(status.userPseudo);
+    });
+
+    badge.textContent = unseenContacts.size > 99 ? '99+' : String(unseenContacts.size);
+    badge.style.display = unseenContacts.size > 0 ? 'block' : 'none';
+}
+
+function renderActusFriends() {
+    const list = $('actusFriendsList');
+    if (!list) return;
+
+    // Get statuses of contacts
+    const myContacts = currentUser?.contacts || [];
+    const friendStatuses = new Map();
+
+    statuses.forEach(s => {
+        if (s.userPseudo === currentUser?.pseudo) return; // skip own
+        // Only show if contact
+        const userPhone = allUsers.find(u => u.pseudo === s.userPseudo)?.phoneNumber;
+        const isMutual  = myContacts.includes(userPhone) || myContacts.includes(s.userPseudo);
+        if (!isMutual) return;
+        if (!friendStatuses.has(s.userPseudo)) friendStatuses.set(s.userPseudo, []);
+        friendStatuses.get(s.userPseudo).push(s);
+    });
+
+    if (!friendStatuses.size) {
+        list.innerHTML = '<div class="actus-empty-state"><i class="fas fa-circle-notch"></i><p>Aucun statut de vos contacts</p><small>Les statuts sont visibles uniquement entre contacts mutuels</small></div>';
+        return;
+    }
+    list.innerHTML = '';
+    friendStatuses.forEach((sts, pseudo) => {
+        const user = allUsers.find(u => u.pseudo === pseudo);
+        const allSeen = sts.every(s => s.viewedBy?.includes(currentUser.pseudo));
+        const latest  = sts[0];
+        const div = document.createElement('div');
+        div.className = 'actus-friend-item';
+        div.innerHTML = `
+            <div class="actus-friend-ring ${allSeen?'seen':'unseen'}">
+                <img src="${user?.avatar||dicebear(pseudo)}" alt="">
+            </div>
+            <div class="actus-friend-info">
+                <div class="actus-friend-name">${escHtml(pseudo)}</div>
+                <div class="actus-friend-time">${timeAgo(latest.createdAt)} · ${sts.length} statut${sts.length>1?'s':''}</div>
+            </div>
+        `;
+        div.addEventListener('click', () => {
+            openStatusViewer(pseudo);
+        });
+        list.appendChild(div);
+    });
+}
+
+function renderActusChannels() {
+    const list = $('actusChannelsList');
+    if (!list) return;
+    const channelGroups = groups.filter(g => g.isUpdatesChannel);
+    if (!channelGroups.length) {
+        list.innerHTML = '<div class="actus-empty-state"><i class="fas fa-broadcast-tower"></i><p>Aucune chaîne</p></div>';
+        return;
+    }
+    list.innerHTML = '';
+    channelGroups.forEach(ch => {
+        const lastMsg = conversations.filter(m => m.type==='group' && m.groupId===ch.id).sort((a,b)=>new Date(b.date)-new Date(a.date))[0];
+        const div = document.createElement('div');
+        div.className = 'actus-channel-item';
+        div.innerHTML = `
+            <img src="${ch.avatar||dicebear(ch.name)}" class="actus-channel-av" alt="">
+            <div>
+                <div class="actus-channel-name">${escHtml(ch.name)}</div>
+                <div class="actus-channel-sub">${lastMsg ? escHtml(lastMsg.content?.slice(0,50)||'📎') : 'Aucun message'}</div>
+            </div>
+            <span style="font-size:11px;color:var(--text-light);margin-left:auto">${lastMsg?formatTime(lastMsg.date):''}</span>
+        `;
+        div.addEventListener('click', () => openChat({ type:'group', id:ch.id, name:ch.name, avatar:ch.avatar||dicebear(ch.name) }));
+        list.appendChild(div);
+    });
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  THEME MODAL
+// ═══════════════════════════════════════════════════════════════
+function initThemeModal() {
+    if (window.__devchatThemeModalInitialized) return;
+    window.__devchatThemeModalInitialized = true;
+
+    const ACCENTS = ['#2aabee','#25d366','#ff9800','#e53935','#9c27b0','#00bcd4','#f06292'];
+    const container = $('accentColors');
+    if (container) {
+        ACCENTS.forEach(c => {
+            const s = document.createElement('div');
+            s.className = 'accent-swatch' + (c === '#2aabee' ? ' active' : '');
+            s.style.background = c;
+            s.addEventListener('click', () => {
+                document.querySelectorAll('.accent-swatch').forEach(x => x.classList.remove('active'));
+                s.classList.add('active');
+                document.documentElement.style.setProperty('--primary', c);
+                localStorage.setItem('devchat_accent', c);
+                showToast('Couleur appliquée');
+            });
+            container.appendChild(s);
+        });
+    }
+    const fontRange = $('fontSizeRange');
+    const fontVal   = $('fontSizeVal');
+    if (fontRange) {
+        fontRange.addEventListener('input', () => {
+            const v = fontRange.value;
+            document.body.style.fontSize = v + 'px';
+            if (fontVal) fontVal.textContent = v + 'px';
+            localStorage.setItem('devchat_font_size', v);
+        });
+    }
+
+    applyThemeSettings();
+}
+
+function setTheme(theme, btn) {
+    document.querySelectorAll('.theme-option').forEach(o => o.classList.remove('active'));
+    if (btn) btn.classList.add('active');
+    if (theme === 'dark')  { document.body.classList.remove('theme-light'); }
+    if (theme === 'light') { document.body.classList.add('theme-light'); }
+    if (theme === 'auto')  {
+        const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+        document.body.classList.toggle('theme-light', !prefersDark);
+    }
+    localStorage.setItem('devchat_theme', theme);
+    showToast('Thème appliqué');
+}
+window.setTheme = setTheme;
+
+function applyThemeSettings() {
+    const savedTheme = localStorage.getItem('devchat_theme') || 'dark';
+    const savedAccent = localStorage.getItem('devchat_accent');
+    const savedFontSize = localStorage.getItem('devchat_font_size');
+    const themeBtn = document.querySelector(`.theme-option[data-theme="${savedTheme}"]`);
+
+    document.querySelectorAll('.theme-option').forEach(option => option.classList.remove('active'));
+    if (themeBtn) themeBtn.classList.add('active');
+
+    if (savedTheme === 'light') document.body.classList.add('theme-light');
+    else if (savedTheme === 'dark') document.body.classList.remove('theme-light');
+    else {
+        const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+        document.body.classList.toggle('theme-light', !prefersDark);
+    }
+
+    if (savedAccent) {
+        document.documentElement.style.setProperty('--primary', savedAccent);
+        document.querySelectorAll('.accent-swatch').forEach(swatch => {
+            swatch.classList.toggle('active', swatch.style.background === savedAccent);
+        });
+    }
+
+    if (savedFontSize) {
+        document.body.style.fontSize = savedFontSize + 'px';
+        if ($('fontSizeRange')) $('fontSizeRange').value = savedFontSize;
+        if ($('fontSizeVal')) $('fontSizeVal').textContent = savedFontSize + 'px';
+    }
+}
+
+// Apply saved theme on load
+(function() {
+    const saved = localStorage.getItem('devchat_theme');
+    if (saved === 'light') document.body.classList.add('theme-light');
+})();
+
+function bootstrapStoredSession() {
+    if (!readStoredSession()) return;
+    const restore = () => restoreSessionWithToken((res) => {
+        onAuthSuccess(res);
+    });
+    if (socket.connected) restore();
+    else socket.once('connect', restore);
+}
+
+bootstrapStoredSession();
+
+// ═══════════════════════════════════════════════════════════════
+//  openDrawerSection — make sure 'statuses' opens status composer
+// ═══════════════════════════════════════════════════════════════
+const _origOpenDrawerSection = typeof openDrawerSection === 'function' ? openDrawerSection : null;
+function openDrawerSection(section) {
+    // Close drawer first
+    const drawer = $('drawer'), overlay = $('drawerOverlay');
+    if (drawer)  drawer.classList.remove('open');
+    if (overlay) overlay.classList.remove('show');
+    $('topbarCtxMenu')?.classList.remove('open');
+
+    if (section === 'statuses') {
+        openStatusComposerModal();
+        return;
+    }
+    if (section === 'profile') { openProfileModal(); return; }
+    if (section === 'explore') { openExploreModal(); return; }
+    if (section === 'newgroup'){ openModal('newGroupModal'); return; }
+    if (section === 'secret')  { showToast('Ouvrez un chat → menu → Chat secret'); return; }
+}
+window.openDrawerSection = openDrawerSection;
+
+// openAdminModal wrapper
+function openAdminModal() {
+    openProfileModal();
+    // Admin stats are shown inside profile modal
+    setTimeout(() => {
+        if (currentUser?.isAdmin) requestAppStats();
+    }, 200);
+}
+window.openAdminModal = openAdminModal;
+
+// ═══════════════════════════════════════════════════════════════
+//  TIME AGO helper (for actus)ss
+// ═══════════════════════════════════════════════════════════════
+function timeAgo(iso) {
+    if (!iso) return '';
+    const d    = new Date(iso);
+    const diff = Date.now() - d.getTime();
+    if (diff < 60000)    return 'À l\'instant';
+    if (diff < 3600000)  return `Il y a ${Math.floor(diff/60000)} min`;
+    if (diff < 86400000) return `Il y a ${Math.floor(diff/3600000)}h`;
+    return d.toLocaleDateString('fr-FR');
+}
+
+// Close topbar ctx menu on outside click
+document.addEventListener('click', () => {
+    $('topbarCtxMenu')?.classList.remove('open');
 });

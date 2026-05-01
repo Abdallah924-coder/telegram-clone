@@ -6,8 +6,8 @@
       "avatar": "/avatars/avatar-a8755476.png",
       "bio": "Nous sommes là pour toutes achat et vente de cryptomonnaie",
       "createdAt": "2026-04-22T19:00:25.143Z",
-      "online": true,
-      "lastSeen": "2026-04-24T03:13:51.695Z",
+      "online": false,
+      "lastSeen": "2026-04-25T13:17:57.715Z",
       "blockedUsers": [],
       "hiddenChats": {},
       "ephemeralSettings": {},
@@ -17,7 +17,9 @@
       "contacts": [
         "+242069227277"
       ],
-      "isAdmin": false
+      "isAdmin": false,
+      "email": "",
+      "emailVerified": false
     },
     {
       "pseudo": "Devoue",
@@ -26,11 +28,9 @@
       "bio": "",
       "createdAt": "2026-04-22T19:02:43.771Z",
       "online": true,
-      "lastSeen": "2026-04-24T03:12:21.475Z",
+      "lastSeen": "2026-05-01T21:21:20.879Z",
       "blockedUsers": [],
-      "hiddenChats": {
-        "private:Magellan": "2026-04-22T21:33:04.949Z"
-      },
+      "hiddenChats": {},
       "ephemeralSettings": {},
       "phoneCountryCode": "+242",
       "phoneLocalNumber": "069227277",
@@ -38,7 +38,9 @@
       "contacts": [
         "+242069325937"
       ],
-      "isAdmin": false
+      "isAdmin": false,
+      "email": "",
+      "emailVerified": false
     },
     {
       "pseudo": "Admin DevChat",
@@ -55,7 +57,9 @@
       "contacts": [],
       "blockedUsers": [],
       "hiddenChats": {},
-      "ephemeralSettings": {}
+      "ephemeralSettings": {},
+      "email": "",
+      "emailVerified": false
     }
   ],
   "messages": [
@@ -387,7 +391,8 @@
       "replyTo": null,
       "date": "2026-04-24T02:40:11.651Z",
       "readBy": [
-        "Magellan"
+        "Magellan",
+        "Devoue"
       ],
       "reactions": {}
     },
@@ -479,6 +484,25 @@
       ],
       "reactions": {},
       "editedAt": "2026-04-24T03:13:12.741Z"
+    },
+    {
+      "id": "225c73e1-d7a4-4f29-b86c-5df556c38dd4",
+      "type": "private",
+      "isSecret": false,
+      "isEphemeral": false,
+      "expiresAt": null,
+      "from": "Devoue",
+      "to": "Magellan",
+      "content": "Salut",
+      "fileUrl": null,
+      "fileName": null,
+      "fileType": null,
+      "replyTo": null,
+      "date": "2026-04-26T19:26:20.247Z",
+      "readBy": [
+        "Devoue"
+      ],
+      "reactions": {}
     }
   ],
   "groups": [
@@ -524,65 +548,5 @@
       "createdAt": "2026-04-24T01:17:23.259Z"
     }
   ],
-  "statuses": [
-    {
-      "id": "fdec1da6-87b6-4642-9569-5ebc0c33ae8d",
-      "userPseudo": "Devoue",
-      "text": "Salut",
-      "mediaUrl": null,
-      "fileType": null,
-      "fileName": null,
-      "createdAt": "2026-04-24T02:30:24.684Z",
-      "expiresAt": "2026-04-25T02:30:24.684Z",
-      "viewedBy": [
-        "Devoue",
-        "Magellan"
-      ]
-    },
-    {
-      "id": "3ff30c2e-6c4d-49fb-8b60-29af8024d87c",
-      "userPseudo": "Magellan",
-      "text": "Bonjour la team",
-      "mediaUrl": null,
-      "fileType": null,
-      "fileName": null,
-      "background": "night",
-      "createdAt": "2026-04-24T02:41:05.286Z",
-      "expiresAt": "2026-04-25T02:41:05.286Z",
-      "viewedBy": [
-        "Magellan",
-        "Devoue"
-      ]
-    },
-    {
-      "id": "a306e761-74fd-46ea-bbc6-aacb17ea2e6e",
-      "userPseudo": "Devoue",
-      "text": "",
-      "mediaUrl": "/uploads/1776999628885-f230977c.webm",
-      "fileType": "video/webm",
-      "fileName": "Screencast from 2026-03-18 02-31-55.webm",
-      "background": "ocean",
-      "createdAt": "2026-04-24T03:00:34.739Z",
-      "expiresAt": "2026-04-25T03:00:34.739Z",
-      "viewedBy": [
-        "Devoue",
-        "Magellan"
-      ]
-    },
-    {
-      "id": "08b7efda-c913-4af7-8035-59f3aa4b3516",
-      "userPseudo": "Magellan",
-      "text": "C'est un bon je vous assure.",
-      "mediaUrl": null,
-      "fileType": null,
-      "fileName": null,
-      "background": "sunset",
-      "createdAt": "2026-04-24T03:01:20.085Z",
-      "expiresAt": "2026-04-25T03:01:20.085Z",
-      "viewedBy": [
-        "Magellan",
-        "Devoue"
-      ]
-    }
-  ]
+  "statuses": []
 }

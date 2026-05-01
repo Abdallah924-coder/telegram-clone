@@ -52,6 +52,8 @@ const AVATARS_DIR = process.env.AVATARS_DIR || (DEFAULT_STORAGE_ROOT ? path.join
 const STATUS_TTL_MS = 24 * 60 * 60 * 1000;
 const UPDATE_CHANNEL_KEY = 'system:updates';
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const OTP_TTL_MS = 10 * 60 * 1000;
+const OTP_RESEND_COOLDOWN_MS = 45 * 1000;
 const MONGODB_URI = String(process.env.MONGODB_URI || '').trim();
 const MONGODB_DB_NAME = String(process.env.MONGODB_DB_NAME || 'devchat').trim();
 const MONGODB_COLLECTION = String(process.env.MONGODB_COLLECTION || 'app_state').trim();
@@ -69,6 +71,9 @@ const ALLOWED_UPLOAD_MIME_TYPES = new Set([
 let mongoClient = null;
 let mongoCollection = null;
 let persistChain = Promise.resolve();
+const TRUSTED_UPLOAD_PATH_RE = /^\/uploads\/[a-zA-Z0-9._-]+$/;
+const TRUSTED_AVATAR_PATH_RE = /^\/avatars\/[a-zA-Z0-9._-]+$/;
+let pendingOtps = new Map();
 
 function normalizeCountryCode(value) {
     const digits = String(value || '').replace(/\D/g, '');
@@ -86,6 +91,14 @@ function normalizePhone(countryCode, phoneNumber) {
     const local = normalizePhoneLocal(raw);
     if (!code || !local) return '';
     return `${code}${local}`;
+}
+
+function normalizeEmail(value) {
+    return String(value || '').trim().toLowerCase();
+}
+
+function isValidEmail(value) {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizeEmail(value));
 }
 
 function normalizeStandalonePhone(value) {
@@ -142,6 +155,8 @@ function ensureUserDefaults(user) {
     }
     user.contacts = [...new Set((Array.isArray(user.contacts) ? user.contacts : []).map(contact => normalizeStandalonePhone(contact)).filter(Boolean))];
     user.isAdmin = !!user.isAdmin;
+    user.email = normalizeEmail(user.email || '');
+    user.emailVerified = !!user.emailVerified;
     return user;
 }
 
@@ -287,6 +302,20 @@ function issueSessionToken(pseudo) {
     return token;
 }
 
+function getSessionFromToken(rawToken, shouldExtend = true) {
+    cleanupExpiredSessions();
+    const token = String(rawToken || '').trim();
+    if (!token) return null;
+    const session = authSessions.get(token);
+    if (!session) return null;
+    if (session.expiresAt <= Date.now()) {
+        authSessions.delete(token);
+        return null;
+    }
+    if (shouldExtend) session.expiresAt = Date.now() + SESSION_TTL_MS;
+    return session;
+}
+
 function cleanupExpiredSessions() {
     const now = Date.now();
     for (const [token, session] of authSessions.entries()) {
@@ -295,18 +324,9 @@ function cleanupExpiredSessions() {
 }
 
 function getSessionPseudoFromRequest(req) {
-    cleanupExpiredSessions();
     const header = req.headers.authorization || req.headers['x-session-token'] || '';
     const token = String(header).startsWith('Bearer ') ? String(header).slice(7).trim() : String(header).trim();
-    if (!token) return null;
-    const session = authSessions.get(token);
-    if (!session) return null;
-    if (session.expiresAt <= Date.now()) {
-        authSessions.delete(token);
-        return null;
-    }
-    session.expiresAt = Date.now() + SESSION_TTL_MS;
-    return session.pseudo;
+    return getSessionFromToken(token)?.pseudo || null;
 }
 
 function requireUploadAuth(req, res, next) {
@@ -335,6 +355,37 @@ function avatarFileFilter(req, file, cb) {
         return cb(new Error('Image requise'));
     }
     cb(null, true);
+}
+
+function sanitizeMediaPayload(fileUrl, fileName, fileType, { allowAvatars = false } = {}) {
+    const normalizedUrl = String(fileUrl || '').trim();
+    const trustedPath = TRUSTED_UPLOAD_PATH_RE.test(normalizedUrl) || (allowAvatars && TRUSTED_AVATAR_PATH_RE.test(normalizedUrl));
+    if (!normalizedUrl) {
+        return { fileUrl: null, fileName: null, fileType: null };
+    }
+    if (!trustedPath) {
+        return { fileUrl: null, fileName: null, fileType: null, invalid: true };
+    }
+
+    const normalizedType = String(fileType || '').toLowerCase().trim();
+    const trustedType = normalizedType && (
+        ALLOWED_UPLOAD_MIME_PREFIXES.some(prefix => normalizedType.startsWith(prefix)) ||
+        ALLOWED_UPLOAD_MIME_TYPES.has(normalizedType)
+    );
+
+    return {
+        fileUrl: normalizedUrl,
+        fileName: String(fileName || '').slice(0, 200) || path.basename(normalizedUrl),
+        fileType: trustedType ? normalizedType : null
+    };
+}
+
+function maskPhoneNumber(phone) {
+    const normalized = normalizeStandalonePhone(phone);
+    if (!normalized) return '';
+    const visibleTail = normalized.slice(-3);
+    const hiddenLength = Math.max(0, normalized.length - 4);
+    return `${normalized.slice(0, 4)}${'•'.repeat(hiddenLength)}${visibleTail}`;
 }
 
 function conversationKeyForMessage(msg, userPseudo) {
@@ -406,6 +457,8 @@ function safeUser(user) {
 function selfUserPayload(user) {
     return {
         ...safeUser(user),
+        email: user.email || '',
+        emailVerified: !!user.emailVerified,
         phoneCountryCode: user.phoneCountryCode || '',
         phoneLocalNumber: user.phoneLocalNumber || '',
         phoneNumber: getUserPhone(user),
@@ -416,6 +469,56 @@ function selfUserPayload(user) {
         hiddenChats: user.hiddenChats || {},
         ephemeralSettings: user.ephemeralSettings || {}
     };
+}
+
+function otpKey(purpose, email) {
+    return `${purpose}:${normalizeEmail(email)}`;
+}
+
+function cleanupExpiredOtps() {
+    const now = Date.now();
+    for (const [key, otpState] of pendingOtps.entries()) {
+        if (!otpState || otpState.expiresAt <= now) pendingOtps.delete(key);
+    }
+}
+
+function issueOtpForEmail(purpose, email, payload = {}) {
+    cleanupExpiredOtps();
+    const normalizedEmail = normalizeEmail(email);
+    const key = otpKey(purpose, normalizedEmail);
+    const existing = pendingOtps.get(key);
+    const now = Date.now();
+    if (existing && existing.lastSentAt && now - existing.lastSentAt < OTP_RESEND_COOLDOWN_MS) {
+        const remainingSeconds = Math.ceil((OTP_RESEND_COOLDOWN_MS - (now - existing.lastSentAt)) / 1000);
+        throw new Error(`Réessayez dans ${remainingSeconds}s`);
+    }
+
+    const otp = `${Math.floor(100000 + Math.random() * 900000)}`;
+    pendingOtps.set(key, {
+        otp,
+        email: normalizedEmail,
+        purpose,
+        payload,
+        expiresAt: now + OTP_TTL_MS,
+        lastSentAt: now,
+        attempts: 0
+    });
+    console.log(`[OTP ${purpose}] ${normalizedEmail}: ${otp}`);
+    return otp;
+}
+
+function verifyOtpForEmail(purpose, email, otp) {
+    cleanupExpiredOtps();
+    const key = otpKey(purpose, email);
+    const state = pendingOtps.get(key);
+    if (!state) return { ok: false, error: 'Code OTP expiré ou introuvable' };
+    if (String(state.otp) !== String(otp || '').trim()) {
+        state.attempts = (state.attempts || 0) + 1;
+        if (state.attempts >= 5) pendingOtps.delete(key);
+        return { ok: false, error: 'Code OTP invalide' };
+    }
+    pendingOtps.delete(key);
+    return { ok: true, payload: state.payload || {} };
 }
 
 function safeStatus(status, viewerPseudo) {
@@ -507,22 +610,28 @@ function finalizeAuth(socket, user, callback) {
 }
 
 function ensureAdminAccount() {
-    const adminPseudo = (process.env.ADMIN_PSEUDO || 'Magellan').trim();
+    const configuredAdminPseudo = String(process.env.ADMIN_PSEUDO || '').trim();
+    const adminPseudo = configuredAdminPseudo || 'Admin DevChat';
     const adminPassword = process.env.ADMIN_PASSWORD || crypto.randomBytes(12).toString('hex');
     const envPhone = normalizeStandalonePhone(process.env.ADMIN_PHONE);
     const adminCountryCode = normalizeCountryCode(process.env.ADMIN_COUNTRY_CODE || '+242');
     const adminLocalNumber = normalizePhoneLocal(process.env.ADMIN_PHONE_LOCAL || '069325937');
     const adminPhone = envPhone || normalizePhone(adminCountryCode, adminLocalNumber);
+    const existingAdmins = Object.values(persistentUsers).filter(user => user.isAdmin);
 
-    // 1. Retirer isAdmin de tous les comptes sauf le pseudo cible
-    //    (évite d'avoir plusieurs admins fantômes comme "Admin DevChat")
-    Object.values(persistentUsers).forEach(u => {
-        if (u.pseudo !== adminPseudo) u.isAdmin = false;
-    });
+    // Ne pas réécrire silencieusement les rôles si aucun admin explicite n'est configuré
+    // et qu'un administrateur existe déjà dans les données.
+    if (!configuredAdminPseudo && existingAdmins.length) {
+        existingAdmins.forEach(ensureUserDefaults);
+        return;
+    }
 
-    // 2. Chercher par pseudo (priorité)
+    // 1. Chercher par pseudo (priorité)
     const existingByPseudo = persistentUsers[adminPseudo];
     if (existingByPseudo) {
+        Object.values(persistentUsers).forEach(u => {
+            if (u.pseudo !== adminPseudo) u.isAdmin = false;
+        });
         existingByPseudo.isAdmin = true;
         existingByPseudo.phoneCountryCode = existingByPseudo.phoneCountryCode || adminCountryCode;
         existingByPseudo.phoneLocalNumber = existingByPseudo.phoneLocalNumber || adminLocalNumber;
@@ -532,16 +641,22 @@ function ensureAdminAccount() {
         return;
     }
 
-    // 3. Chercher par téléphone
+    // 2. Chercher par téléphone
     const existingByPhone = findUserByPhone(adminPhone);
     if (existingByPhone) {
+        Object.values(persistentUsers).forEach(u => {
+            if (u.pseudo !== existingByPhone.pseudo) u.isAdmin = false;
+        });
         existingByPhone.isAdmin = true;
         ensureUserDefaults(existingByPhone);
         console.log(`✅ Admin: "${existingByPhone.pseudo}" promu administrateur via téléphone`);
         return;
     }
 
-    // 4. Créer le compte admin s'il n'existe pas du tout
+    // 3. Créer le compte admin s'il n'existe pas du tout
+    Object.values(persistentUsers).forEach(u => {
+        if (u.pseudo !== adminPseudo) u.isAdmin = false;
+    });
 
     persistentUsers[adminPseudo] = ensureUserDefaults({
         pseudo: adminPseudo,
@@ -646,7 +761,7 @@ app.post('/api/upload', requireUploadAuth, (req, res) => {
     });
 });
 
-app.post('/api/upload-avatar', (req, res) => {
+app.post('/api/upload-avatar', requireUploadAuth, (req, res) => {
     avatarUpload.single('avatar')(req, res, err => {
         if (err) return res.status(400).json({ error: err.message || 'Upload impossible' });
         if (!req.file) return res.status(400).json({ error: 'Aucun fichier' });
@@ -657,25 +772,37 @@ app.post('/api/upload-avatar', (req, res) => {
 io.on('connection', (socket) => {
     console.log('🔌 Connexion:', socket.id);
 
-    socket.on('auth', async ({ pseudo, password, isRegister, avatar, countryCode, phoneNumber }, callback) => {
+    socket.on('auth', async ({ pseudo, password, isRegister, avatar, countryCode, phoneNumber, sessionToken, email, otp }, callback) => {
         try {
             const normalizedPseudo = String(pseudo || '').trim();
             const normalizedPhone = normalizePhone(countryCode, phoneNumber);
             const normalizedPassword = String(password || '');
+            const normalizedEmail = normalizeEmail(email);
+            const providedOtp = String(otp || '').trim();
+            const tokenSession = getSessionFromToken(sessionToken);
+            const tokenUser = tokenSession?.pseudo ? persistentUsers[tokenSession.pseudo] : null;
             const existing = normalizedPhone ? findUserByPhone(normalizedPhone) : persistentUsers[normalizedPseudo];
 
             if (isRegister) {
                 if (!normalizedPseudo) return callback({ success: false, error: 'Pseudo requis' });
                 if (!normalizedPhone) return callback({ success: false, error: 'Numero de telephone requis' });
+                if (!isValidEmail(normalizedEmail)) return callback({ success: false, error: 'Email invalide' });
                 if (normalizedPassword.length < 4) return callback({ success: false, error: 'Mot de passe trop court' });
                 if (persistentUsers[normalizedPseudo]) return callback({ success: false, error: 'Ce pseudo est deja pris' });
                 if (findUserByPhone(normalizedPhone)) return callback({ success: false, error: 'Ce numero est deja utilise' });
+                if (Object.values(persistentUsers).some(user => user.email && user.email === normalizedEmail)) {
+                    return callback({ success: false, error: 'Cet email est déjà utilisé' });
+                }
+                const otpCheck = verifyOtpForEmail('register', normalizedEmail, providedOtp);
+                if (!otpCheck.ok) return callback({ success: false, error: otpCheck.error });
                 const hash = await bcrypt.hash(normalizedPassword, 10);
                 const newUser = ensureUserDefaults({
                     pseudo: normalizedPseudo,
                     password: hash,
                     avatar: avatar || `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(normalizedPseudo)}&backgroundColor=2aabee&fontFamily=Helvetica`,
                     bio: '',
+                    email: normalizedEmail,
+                    emailVerified: true,
                     createdAt: new Date().toISOString(),
                     online: true,
                     lastSeen: new Date().toISOString(),
@@ -688,6 +815,13 @@ io.on('connection', (socket) => {
                 saveData();
                 finalizeAuth(socket, newUser, callback);
             } else {
+                if (tokenUser) {
+                    ensureUserDefaults(tokenUser);
+                    tokenUser.online = true;
+                    tokenUser.lastSeen = new Date().toISOString();
+                    saveData();
+                    return finalizeAuth(socket, tokenUser, callback);
+                }
                 const legacyUser = !existing && normalizedPseudo ? persistentUsers[normalizedPseudo] : null;
                 const authUser = existing || legacyUser;
                 if (!authUser) return callback({ success: false, error: 'Utilisateur introuvable' });
@@ -704,7 +838,57 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('reset-password', async ({ pseudo, countryCode, phoneNumber, oldPassword, newPassword }, callback) => {
+    socket.on('request-register-otp', ({ pseudo, countryCode, phoneNumber, email }, callback) => {
+        const normalizedPseudo = String(pseudo || '').trim();
+        const normalizedPhone = normalizePhone(countryCode, phoneNumber);
+        const normalizedEmail = normalizeEmail(email);
+        if (!normalizedPseudo) return callback?.({ success: false, error: 'Pseudo requis' });
+        if (!normalizedPhone) return callback?.({ success: false, error: 'Numero invalide' });
+        if (!isValidEmail(normalizedEmail)) return callback?.({ success: false, error: 'Email invalide' });
+        if (persistentUsers[normalizedPseudo]) return callback?.({ success: false, error: 'Ce pseudo est deja pris' });
+        if (findUserByPhone(normalizedPhone)) return callback?.({ success: false, error: 'Ce numero est deja utilise' });
+        if (Object.values(persistentUsers).some(user => user.email && user.email === normalizedEmail)) {
+            return callback?.({ success: false, error: 'Cet email est déjà utilisé' });
+        }
+        try {
+            const otp = issueOtpForEmail('register', normalizedEmail, {
+                pseudo: normalizedPseudo,
+                phoneNumber: normalizedPhone
+            });
+            callback?.({
+                success: true,
+                message: 'Code OTP envoyé',
+                ...(process.env.NODE_ENV === 'production' ? {} : { devOtp: otp })
+            });
+        } catch (err) {
+            callback?.({ success: false, error: err.message });
+        }
+    });
+
+    socket.on('request-reset-otp', ({ pseudo, countryCode, phoneNumber, email }, callback) => {
+        const normalizedEmail = normalizeEmail(email);
+        const normalizedPhone = normalizePhone(countryCode, phoneNumber);
+        const userByPhone = normalizedPhone ? findUserByPhone(normalizedPhone) : null;
+        const userByPseudo = persistentUsers[String(pseudo || '').trim()] || null;
+        const user = userByPhone || userByPseudo;
+        if (!user) return callback?.({ success: false, error: 'Utilisateur introuvable' });
+        if (!isValidEmail(normalizedEmail)) return callback?.({ success: false, error: 'Email invalide' });
+        if (normalizeEmail(user.email) !== normalizedEmail) {
+            return callback?.({ success: false, error: 'Cet email ne correspond pas au compte' });
+        }
+        try {
+            const otp = issueOtpForEmail('reset', normalizedEmail, { pseudo: user.pseudo });
+            callback?.({
+                success: true,
+                message: 'Code OTP envoyé',
+                ...(process.env.NODE_ENV === 'production' ? {} : { devOtp: otp })
+            });
+        } catch (err) {
+            callback?.({ success: false, error: err.message });
+        }
+    });
+
+    socket.on('reset-password', async ({ pseudo, countryCode, phoneNumber, oldPassword, newPassword, email, otp }, callback) => {
         const sessionPseudo = socketUsers[socket.id];
         const normalizedNewPassword = String(newPassword || '');
         if (normalizedNewPassword.length < 4) {
@@ -721,28 +905,37 @@ io.on('connection', (socket) => {
             return callback?.({ success: true });
         }
 
-        if (!ALLOW_INSECURE_PASSWORD_RESET) {
-            return callback?.({
-                success: false,
-                error: 'Réinitialisation désactivée pour sécurité. Connectez-vous puis changez le mot de passe depuis votre session.'
-            });
-        }
-
+        const normalizedEmail = normalizeEmail(email);
         const normalizedPhone = normalizePhone(countryCode, phoneNumber);
-        const user = (normalizedPhone && findUserByPhone(normalizedPhone)) || persistentUsers[String(pseudo || '').trim()];
+        const userByPhone = normalizedPhone ? findUserByPhone(normalizedPhone) : null;
+        const userByPseudo = persistentUsers[String(pseudo || '').trim()] || null;
+        const user = userByPhone || userByPseudo;
         if (!user) return callback?.({ success: false, error: 'Utilisateur introuvable' });
+        if (normalizeEmail(user.email) !== normalizedEmail) {
+            return callback?.({ success: false, error: 'Cet email ne correspond pas au compte' });
+        }
+        const otpCheck = verifyOtpForEmail('reset', normalizedEmail, otp);
+        if (!otpCheck.ok) return callback?.({ success: false, error: otpCheck.error });
         user.password = await bcrypt.hash(normalizedNewPassword, 10);
         saveData();
-        callback?.({ success: true });
+        return callback?.({ success: true });
     });
 
-    socket.on('update-profile', ({ avatar, bio, countryCode, phoneNumber }, callback) => {
+    socket.on('update-profile', ({ avatar, bio, countryCode, phoneNumber, email }, callback) => {
         const pseudo = socketUsers[socket.id];
         if (!pseudo) return callback?.({ success: false });
         const user = persistentUsers[pseudo];
         if (!user) return callback?.({ success: false });
         if (avatar) user.avatar = avatar;
         if (bio !== undefined) user.bio = bio;
+        if (email !== undefined) {
+            const normalizedEmail = normalizeEmail(email);
+            if (!isValidEmail(normalizedEmail)) return callback?.({ success: false, error: 'Email invalide' });
+            const duplicate = Object.values(persistentUsers).find(candidate => candidate.email === normalizedEmail && candidate.pseudo !== pseudo);
+            if (duplicate) return callback?.({ success: false, error: 'Cet email est déjà utilisé' });
+            user.email = normalizedEmail;
+            user.emailVerified = true;
+        }
         if (countryCode || phoneNumber) {
             const nextPhone = normalizePhone(countryCode, phoneNumber);
             if (!nextPhone) return callback?.({ success: false, error: 'Numero invalide' });
@@ -851,6 +1044,10 @@ io.on('connection', (socket) => {
         if (recipient.blockedUsers?.includes(from)) {
             return callback?.({ success: false, error: 'Cette personne vous a bloqué' });
         }
+        const media = sanitizeMediaPayload(fileUrl, fileName, fileType);
+        if (media.invalid) {
+            return callback?.({ success: false, error: 'Fichier invalide' });
+        }
 
         const ttl = Number(sender.ephemeralSettings?.[to] || 0);
         const msg = {
@@ -862,9 +1059,9 @@ io.on('connection', (socket) => {
             from,
             to,
             content: content || '',
-            fileUrl: fileUrl || null,
-            fileName: fileName || null,
-            fileType: fileType || null,
+            fileUrl: media.fileUrl,
+            fileName: media.fileName,
+            fileType: media.fileType,
             replyTo: replyTo || null,
             date: new Date().toISOString(),
             readBy: [from],
@@ -893,6 +1090,10 @@ io.on('connection', (socket) => {
         if (group.isUpdatesChannel && !group.admins.includes(from)) {
             return callback?.({ success: false, error: 'Seuls les administrateurs peuvent publier dans ce canal' });
         }
+        const media = sanitizeMediaPayload(fileUrl, fileName, fileType);
+        if (media.invalid) {
+            return callback?.({ success: false, error: 'Fichier invalide' });
+        }
 
         const msg = {
             id: uuidv4(),
@@ -900,9 +1101,9 @@ io.on('connection', (socket) => {
             groupId,
             from,
             content: content || '',
-            fileUrl: fileUrl || null,
-            fileName: fileName || null,
-            fileType: fileType || null,
+            fileUrl: media.fileUrl,
+            fileName: media.fileName,
+            fileType: media.fileType,
             replyTo: replyTo || null,
             date: new Date().toISOString(),
             readBy: [from],
@@ -1116,6 +1317,56 @@ io.on('connection', (socket) => {
         }
     });
 
+    socket.on('call-user', ({ to, mode }, callback) => {
+        const from = socketUsers[socket.id];
+        const recipient = persistentUsers[String(to || '').trim()];
+        const normalizedMode = mode === 'video' ? 'video' : 'audio';
+        if (!from) return callback?.({ success: false, error: 'Session invalide' });
+        if (!recipient) return callback?.({ success: false, error: 'Utilisateur introuvable' });
+        if (recipient.blockedUsers?.includes(from)) {
+            return callback?.({ success: false, error: 'Cette personne vous a bloqué' });
+        }
+        const targetSid = _getSocketId(recipient.pseudo);
+        if (!targetSid) return callback?.({ success: false, error: 'Utilisateur hors ligne' });
+        io.to(targetSid).emit('incoming-call', {
+            from,
+            mode: normalizedMode,
+            avatar: persistentUsers[from]?.avatar || ''
+        });
+        callback?.({ success: true });
+    });
+
+    socket.on('call-response', ({ to, accepted, mode, reason }, callback) => {
+        const from = socketUsers[socket.id];
+        const targetSid = _getSocketId(String(to || '').trim());
+        if (!from || !targetSid) return callback?.({ success: false, error: 'Utilisateur indisponible' });
+        io.to(targetSid).emit('call-response', {
+            from,
+            accepted: !!accepted,
+            mode: mode === 'video' ? 'video' : 'audio',
+            reason: String(reason || '')
+        });
+        callback?.({ success: true });
+    });
+
+    socket.on('call-signal', ({ to, data }, callback) => {
+        const from = socketUsers[socket.id];
+        const targetSid = _getSocketId(String(to || '').trim());
+        if (!from || !targetSid || !data || typeof data !== 'object') {
+            return callback?.({ success: false, error: 'Signal invalide' });
+        }
+        io.to(targetSid).emit('call-signal', { from, data });
+        callback?.({ success: true });
+    });
+
+    socket.on('end-call', ({ to, reason }, callback) => {
+        const from = socketUsers[socket.id];
+        const targetSid = _getSocketId(String(to || '').trim());
+        if (!from) return callback?.({ success: false, error: 'Session invalide' });
+        if (targetSid) io.to(targetSid).emit('call-ended', { from, reason: String(reason || '') });
+        callback?.({ success: true });
+    });
+
     socket.on('create-status', ({ text, mediaUrl, fileType, fileName, background }, callback) => {
         const from = socketUsers[socket.id];
         if (!from) return callback?.({ success: false, error: 'Session invalide' });
@@ -1123,14 +1374,18 @@ io.on('connection', (socket) => {
         if (!getUserPhone(persistentUsers[from])) {
             return callback?.({ success: false, error: 'Ajoutez votre numero principal avant de publier un statut' });
         }
+        const media = sanitizeMediaPayload(mediaUrl, fileName, fileType);
+        if (media.invalid) {
+            return callback?.({ success: false, error: 'Media invalide' });
+        }
 
         const status = {
             id: uuidv4(),
             userPseudo: from,
             text: text || '',
-            mediaUrl: mediaUrl || null,
-            fileType: fileType || null,
-            fileName: fileName || null,
+            mediaUrl: media.fileUrl,
+            fileType: media.fileType,
+            fileName: media.fileName,
             background: typeof background === 'string' ? background : null,
             createdAt: new Date().toISOString(),
             expiresAt: new Date(Date.now() + STATUS_TTL_MS).toISOString(),
@@ -1187,7 +1442,7 @@ io.on('connection', (socket) => {
             })
             .map(user => ({
                 ...safeUser(user),
-                phoneNumber: getUserPhone(user),
+                maskedPhoneNumber: maskPhoneNumber(getUserPhone(user)),
                 blocked: persistentUsers[from]?.blockedUsers?.includes(user.pseudo) || false,
                 inContacts: persistentUsers[from]?.contacts?.includes(getUserPhone(user)) || false
             }));
@@ -1293,7 +1548,7 @@ async function bootstrap() {
     ensureUpdatesChannel();
 
     // ── Vérification finale admin ──────────────────────────────
-    const adminPseudo = (process.env.ADMIN_PSEUDO || 'Magellan').trim();
+    const adminPseudo = String(process.env.ADMIN_PSEUDO || 'Admin DevChat').trim();
     const finalAdmin = persistentUsers[adminPseudo];
     if (finalAdmin) {
         console.log(`🔑 Admin final: "${adminPseudo}" isAdmin=${finalAdmin.isAdmin}`);
