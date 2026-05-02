@@ -481,14 +481,14 @@ function avatarFileFilter(req, file, cb) {
     cb(null, true);
 }
 
-function sanitizeMediaPayload(fileUrl, fileName, fileType, { allowAvatars = false } = {}) {
+function sanitizeMediaPayload(fileUrl, fileName, fileType, fileSize, { allowAvatars = false } = {}) {
     const normalizedUrl = String(fileUrl || '').trim();
     const trustedPath = TRUSTED_UPLOAD_PATH_RE.test(normalizedUrl) || (allowAvatars && TRUSTED_AVATAR_PATH_RE.test(normalizedUrl));
     if (!normalizedUrl) {
-        return { fileUrl: null, fileName: null, fileType: null };
+        return { fileUrl: null, fileName: null, fileType: null, fileSize: 0 };
     }
     if (!trustedPath) {
-        return { fileUrl: null, fileName: null, fileType: null, invalid: true };
+        return { fileUrl: null, fileName: null, fileType: null, fileSize: 0, invalid: true };
     }
 
     const normalizedType = String(fileType || '').toLowerCase().trim();
@@ -496,11 +496,13 @@ function sanitizeMediaPayload(fileUrl, fileName, fileType, { allowAvatars = fals
         ALLOWED_UPLOAD_MIME_PREFIXES.some(prefix => normalizedType.startsWith(prefix)) ||
         ALLOWED_UPLOAD_MIME_TYPES.has(normalizedType)
     );
+    const normalizedSize = Math.max(0, Number(fileSize || 0));
 
     return {
         fileUrl: normalizedUrl,
         fileName: String(fileName || '').slice(0, 200) || path.basename(normalizedUrl),
-        fileType: trustedType ? normalizedType : null
+        fileType: trustedType ? normalizedType : null,
+        fileSize: Number.isFinite(normalizedSize) ? normalizedSize : 0
     };
 }
 
@@ -1049,7 +1051,8 @@ app.post('/api/upload', requireUploadAuth, (req, res) => {
         res.json({
             fileUrl: `/uploads/${req.file.filename}`,
             fileName: req.file.originalname,
-            fileType: req.file.mimetype
+            fileType: req.file.mimetype,
+            fileSize: req.file.size
         });
     });
 });
@@ -1403,7 +1406,7 @@ io.on('connection', (socket) => {
         callback?.({ success: true, user: selfUserPayload(user) });
     });
 
-    socket.on('private-message', ({ to, content, fileUrl, fileName, fileType, replyTo, isSecret }, callback) => {
+    socket.on('private-message', ({ to, content, fileUrl, fileName, fileType, fileSize, replyTo, isSecret }, callback) => {
         const from = socketUsers[socket.id];
         const sender = persistentUsers[from];
         const recipient = persistentUsers[to];
@@ -1412,7 +1415,7 @@ io.on('connection', (socket) => {
         if (recipient.blockedUsers?.includes(from)) {
             return callback?.({ success: false, error: 'Cette personne vous a bloqué' });
         }
-        const media = sanitizeMediaPayload(fileUrl, fileName, fileType);
+        const media = sanitizeMediaPayload(fileUrl, fileName, fileType, fileSize);
         if (media.invalid) {
             return callback?.({ success: false, error: 'Fichier invalide' });
         }
@@ -1430,6 +1433,7 @@ io.on('connection', (socket) => {
             fileUrl: media.fileUrl,
             fileName: media.fileName,
             fileType: media.fileType,
+            fileSize: media.fileSize,
             replyTo: replyTo || null,
             date: new Date().toISOString(),
             readBy: [from],
@@ -1447,7 +1451,7 @@ io.on('connection', (socket) => {
         callback?.({ success: true, message: msg });
     });
 
-    socket.on('group-message', ({ groupId, content, fileUrl, fileName, fileType, replyTo }, callback) => {
+    socket.on('group-message', ({ groupId, content, fileUrl, fileName, fileType, fileSize, replyTo }, callback) => {
         const from = socketUsers[socket.id];
         if (!from) return callback?.({ success: false, error: 'Session invalide' });
 
@@ -1458,7 +1462,7 @@ io.on('connection', (socket) => {
         if (group.isUpdatesChannel && !group.admins.includes(from)) {
             return callback?.({ success: false, error: 'Seuls les administrateurs peuvent publier dans ce canal' });
         }
-        const media = sanitizeMediaPayload(fileUrl, fileName, fileType);
+        const media = sanitizeMediaPayload(fileUrl, fileName, fileType, fileSize);
         if (media.invalid) {
             return callback?.({ success: false, error: 'Fichier invalide' });
         }
@@ -1472,6 +1476,7 @@ io.on('connection', (socket) => {
             fileUrl: media.fileUrl,
             fileName: media.fileName,
             fileType: media.fileType,
+            fileSize: media.fileSize,
             replyTo: replyTo || null,
             date: new Date().toISOString(),
             readBy: [from],

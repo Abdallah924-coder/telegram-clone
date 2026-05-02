@@ -47,6 +47,13 @@ let qrScannerStream = null;
 let qrScanRaf = 0;
 let qrBarcodeDetector = null;
 
+function formatFileSize(bytes) {
+    const value = Number(bytes || 0);
+    if (!value) return '';
+    if (value < 1024 * 1024) return `${Math.max(1, Math.round(value / 1024))} Ko`;
+    return `${(value / (1024 * 1024)).toFixed(value >= 10 * 1024 * 1024 ? 0 : 1)} Mo`;
+}
+
 function normalizeCallHistory(entries) {
     if (!Array.isArray(entries)) return [];
     return entries
@@ -491,6 +498,115 @@ async function sendUploadedMessageFile(filePayload) {
         });
     }
     cancelReply();
+}
+
+function removeConversationMessage(messageId) {
+    conversations = conversations.filter(message => message.id !== messageId);
+}
+
+function upsertOptimisticMessage(message) {
+    const index = conversations.findIndex(entry => entry.id === message.id);
+    if (index === -1) conversations.push(message);
+    else conversations[index] = { ...conversations[index], ...message };
+    if (currentChat) renderMessages();
+    renderConversations();
+}
+
+function buildPendingMediaMessage({ chat, file, fileUrl, fileType, fileName, replyMessageId = null }) {
+    if (!chat || !currentUser?.pseudo) return null;
+    return {
+        id: `temp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        type: chat.type,
+        from: currentUser.pseudo,
+        to: chat.type === 'private' ? chat.id : undefined,
+        groupId: chat.type === 'group' ? chat.id : undefined,
+        content: '',
+        fileUrl,
+        fileName: fileName || file?.name || 'media',
+        fileType: fileType || file?.type || '',
+        fileSize: Number(file?.size || 0),
+        replyTo: replyMessageId || null,
+        date: new Date().toISOString(),
+        readBy: [currentUser.pseudo],
+        reactions: {},
+        pendingStatus: 'uploading',
+        localPreviewUrl: fileUrl
+    };
+}
+
+function markPendingMessageFailed(tempId, errorMessage = 'Échec de l’envoi') {
+    const localMessage = conversations.find(message => message.id === tempId);
+    if (!localMessage) return;
+    localMessage.pendingStatus = 'failed';
+    localMessage.pendingError = errorMessage;
+    if (currentChat) renderMessages();
+    renderConversations();
+}
+
+function reconcilePendingMessage(tempId, serverMessage) {
+    const localMessage = conversations.find(message => message.id === tempId);
+    if (localMessage?.localPreviewUrl && localMessage.localPreviewUrl.startsWith('blob:')) {
+        URL.revokeObjectURL(localMessage.localPreviewUrl);
+    }
+    removeConversationMessage(tempId);
+    if (serverMessage) upsertConversationMessage(serverMessage);
+    if (currentChat) renderMessages();
+    renderConversations();
+}
+
+async function sendChatFileWithOptimisticPreview(file, options = {}) {
+    if (!file || !currentChat) return;
+    const chat = {
+        type: currentChat.type,
+        id: currentChat.id,
+        isSecret: !!currentChat.isSecret
+    };
+    const previewUrl = URL.createObjectURL(file);
+    const pendingMessage = buildPendingMediaMessage({
+        chat,
+        file,
+        fileUrl: previewUrl,
+        fileType: file.type,
+        fileName: file.name,
+        replyMessageId: options.replyTo || replyTo?.id || null
+    });
+    if (!pendingMessage) return;
+
+    upsertOptimisticMessage(pendingMessage);
+    if (!options.keepReply) cancelReply();
+
+    try {
+        const fd = new FormData();
+        fd.append('file', file);
+        const uploaded = await apiFetch('/api/upload', { method: 'POST', body: fd });
+        const payload = {
+            content: options.content || '',
+            fileUrl: uploaded.fileUrl,
+            fileName: uploaded.fileName,
+            fileType: uploaded.fileType,
+            fileSize: uploaded.fileSize || file.size || 0,
+            replyTo: pendingMessage.replyTo,
+            isSecret: chat.type === 'private' ? chat.isSecret : false
+        };
+        const eventName = chat.type === 'private' ? 'private-message' : 'group-message';
+        const transportPayload = chat.type === 'private'
+            ? { ...payload, to: chat.id }
+            : { ...payload, groupId: chat.id };
+
+        await new Promise((resolve, reject) => {
+            socket.emit(eventName, transportPayload, (res) => {
+                if (!res?.success || !res.message) {
+                    reject(new Error(res?.error || 'Erreur d\'envoi'));
+                    return;
+                }
+                reconcilePendingMessage(pendingMessage.id, res.message);
+                resolve(res.message);
+            });
+        });
+    } catch (err) {
+        markPendingMessageFailed(pendingMessage.id, err.message || 'Échec de l’envoi');
+        throw err;
+    }
 }
 
 function renderStatusThemePicker() {
@@ -1362,11 +1478,31 @@ function buildMessageEl(msg) {
     } else if (msg.fileUrl) {
         const isImg = /\.(jpg|jpeg|png|gif|webp|svg)$/i.test(msg.fileUrl) || (msg.fileType && msg.fileType.startsWith('image/'));
         const isAudio = msg.fileType && msg.fileType.startsWith('audio/');
+        const isVideo = msg.fileType && msg.fileType.startsWith('video/');
         if (isImg) {
             const img = document.createElement('img');
             img.className = 'msg-img'; img.src = msg.fileUrl; img.alt = 'Image';
             img.addEventListener('click', () => openImageViewer(msg.fileUrl));
             bubble.appendChild(img);
+            if (msg.fileSize) {
+                const size = document.createElement('div');
+                size.className = 'msg-media-meta';
+                size.textContent = formatFileSize(msg.fileSize);
+                bubble.appendChild(size);
+            }
+            if (msg.content) bubble.appendChild(document.createTextNode(msg.content));
+        } else if (isVideo) {
+            const video = document.createElement('video');
+            video.className = 'msg-video';
+            video.src = msg.fileUrl;
+            video.controls = true;
+            video.playsInline = true;
+            if (msg.pendingStatus === 'uploading') video.muted = true;
+            bubble.appendChild(video);
+            const size = document.createElement('div');
+            size.className = 'msg-media-meta';
+            size.textContent = msg.fileSize ? formatFileSize(msg.fileSize) : (msg.fileName || 'Vidéo');
+            bubble.appendChild(size);
             if (msg.content) bubble.appendChild(document.createTextNode(msg.content));
         } else if (isAudio) {
             const audio = document.createElement('audio');
@@ -1374,6 +1510,10 @@ function buildMessageEl(msg) {
             audio.controls = true;
             audio.src = msg.fileUrl;
             bubble.appendChild(audio);
+            const size = document.createElement('div');
+            size.className = 'msg-media-meta';
+            size.textContent = msg.fileSize ? formatFileSize(msg.fileSize) : (msg.fileName || 'Audio');
+            bubble.appendChild(size);
             if (msg.content) bubble.appendChild(document.createTextNode(msg.content));
         } else {
             const fileDiv = document.createElement('div');
@@ -1386,6 +1526,12 @@ function buildMessageEl(msg) {
             link.textContent = msg.fileName || 'Fichier';
             fileDiv.appendChild(icon);
             fileDiv.appendChild(link);
+            if (msg.fileSize) {
+                const size = document.createElement('span');
+                size.className = 'msg-file-size';
+                size.textContent = formatFileSize(msg.fileSize);
+                fileDiv.appendChild(size);
+            }
             bubble.appendChild(fileDiv);
         }
     } else {
@@ -1401,7 +1547,11 @@ function buildMessageEl(msg) {
     if (msg.isEphemeral) meta.innerHTML += `<i class="fas fa-hourglass-half msg-secret-icon"></i>`;
     if (msg.editedAt && !msg.deleted) meta.innerHTML += `<span class="msg-time">modifié</span>`;
     meta.innerHTML += `<span class="msg-time">${formatTime(msg.date)}</span>`;
-    if (isOwn && !msg.deleted) {
+    if (msg.pendingStatus === 'uploading') {
+        meta.innerHTML += `<span class="msg-status pending">Envoi...</span>`;
+    } else if (msg.pendingStatus === 'failed') {
+        meta.innerHTML += `<span class="msg-status failed">${escHtml(msg.pendingError || 'Échec')}</span>`;
+    } else if (isOwn && !msg.deleted) {
         const isRead = msg.readBy && msg.readBy.some(r => r !== currentUser.pseudo);
         meta.innerHTML += `<i class="fas fa-check-double msg-status ${isRead ? 'read' : ''}"></i>`;
     }
@@ -1604,18 +1754,14 @@ $('fileInput').addEventListener('change', async (e) => {
         showToast('Seul l administrateur peut publier dans ce canal');
         return;
     }
-    showToast('Envoi en cours...');
-    let d;
     try {
-        const fd = new FormData(); fd.append('file', file);
-        d = await apiFetch('/api/upload', { method: 'POST', body: fd });
+        await sendChatFileWithOptimisticPreview(file);
+        showToast('Fichier envoyé ✓');
     } catch (err) {
         showToast(err.message);
-        return;
+    } finally {
+        $('fileInput').value = '';
     }
-    await sendUploadedMessageFile(d);
-    $('fileInput').value = '';
-    showToast('Fichier envoyé ✓');
 });
 
 // ── Emoji ──────────────────────────────────────────────────────
@@ -1692,12 +1838,8 @@ $('voiceRecordBtn').addEventListener('click', async () => {
             if (!blob.size) return;
 
             try {
-                showToast('Envoi de la note vocale...');
                 const file = new File([blob], `note-vocale-${Date.now()}.webm`, { type: blob.type || 'audio/webm' });
-                const fd = new FormData();
-                fd.append('file', file);
-                const uploaded = await apiFetch('/api/upload', { method: 'POST', body: fd });
-                await sendUploadedMessageFile(uploaded);
+                await sendChatFileWithOptimisticPreview(file);
                 showToast('Note vocale envoyée ✓');
             } catch (err) {
                 showToast(err.message);
@@ -2527,12 +2669,26 @@ $('changeAvatarBtn').addEventListener('click', () => $('profileAvatarFile').clic
 $('profileAvatarFile').addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file) return;
+    const previousAvatar = currentUser?.avatar;
     try {
         const data = await uploadAvatarFile(file);
         $('profileAvatar').src = data.avatarUrl;
         currentUser.avatar = data.avatarUrl;
+        socket.emit('update-profile', { avatar: data.avatarUrl }, (res) => {
+            if (!res?.success) {
+                currentUser.avatar = previousAvatar;
+                $('profileAvatar').src = previousAvatar || '';
+                showToast(res?.error || 'Erreur');
+                return;
+            }
+            syncCurrentUser(res.user);
+            showToast('Photo de profil mise à jour');
+        });
     } catch (err) {
+        currentUser.avatar = previousAvatar;
         showToast(err.message);
+    } finally {
+        e.target.value = '';
     }
 });
 $('saveProfileBtn').addEventListener('click', () => {

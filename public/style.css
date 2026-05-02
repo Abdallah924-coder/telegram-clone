@@ -964,7 +964,7 @@ a {
 }
 
 .actus-my-status-row {
-  padding: 14px 16px;
+  padding: 10px 14px;
 }
 
 .actus-my-item,
@@ -1012,8 +1012,8 @@ a {
 
 .actus-ring,
 .actus-friend-ring {
-  width: 54px;
-  height: 54px;
+  width: 48px;
+  height: 48px;
   border-radius: 50%;
 }
 
@@ -1108,13 +1108,13 @@ a {
 }
 
 .actus-status-section {
-  padding: 0 12px 12px;
+  padding: 0 10px 10px;
 }
 
 .actus-status-stack {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
 }
 
 .actus-friend-name,
@@ -1149,8 +1149,8 @@ a {
 }
 
 .actus-friend-item {
-  padding: 14px 16px;
-  border-radius: 22px;
+  padding: 11px 13px;
+  border-radius: 18px;
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid var(--border);
 }
@@ -1563,11 +1563,26 @@ a {
   cursor: pointer;
 }
 
+.msg-video {
+  display: block;
+  width: min(280px, 72vw);
+  max-height: 360px;
+  border-radius: 14px;
+  margin-bottom: 6px;
+  background: #000;
+}
+
 .msg-audio {
   width: min(280px, 72vw);
   display: block;
   margin-bottom: 6px;
   filter: saturate(0.92);
+}
+
+.msg-media-meta,
+.msg-file-size {
+  color: var(--text-light);
+  font-size: 11px;
 }
 
 .msg-file {
@@ -1606,6 +1621,14 @@ a {
 
 .msg-status.read {
   color: var(--primary);
+}
+
+.msg-status.pending {
+  color: var(--text-light);
+}
+
+.msg-status.failed {
+  color: #ff8181;
 }
 
 .msg-reactions {
@@ -2520,15 +2543,15 @@ a {
 
 .my-status-item {
   gap: 14px;
-  padding: 18px 18px;
+  padding: 14px 16px;
   border-radius: 0;
   background: transparent;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .my-status-avatar {
-  width: 56px;
-  height: 56px;
+  width: 48px;
+  height: 48px;
   border-radius: 50%;
   object-fit: cover;
 }
@@ -2539,7 +2562,7 @@ a {
 }
 
 .my-status-title {
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 500;
   white-space: nowrap;
   overflow: hidden;
@@ -2582,19 +2605,19 @@ a {
 }
 
 .status-fab {
-  width: 70px;
-  height: 70px;
+  width: 62px;
+  height: 62px;
   border: none;
-  border-radius: 24px;
+  border-radius: 22px;
   box-shadow: var(--shadow-lg);
-  font-size: 26px;
+  font-size: 22px;
 }
 
 .status-fab.secondary {
-  width: 58px;
-  height: 58px;
+  width: 52px;
+  height: 52px;
   align-self: flex-end;
-  border-radius: 20px;
+  border-radius: 18px;
   background: #1b242b;
   color: #fff;
 }
