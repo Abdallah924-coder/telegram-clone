@@ -598,6 +598,8 @@ a {
 
 .search-results-panel,
 .conversations-list {
+  display: flex;
+  flex-direction: column;
   flex: 1;
   overflow-y: auto;
 }
@@ -1105,6 +1107,16 @@ a {
   min-width: 0;
 }
 
+.actus-status-section {
+  padding: 0 12px 12px;
+}
+
+.actus-status-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .actus-friend-name,
 .actus-channel-name,
 .call-item-name,
@@ -1128,6 +1140,27 @@ a {
 .form-help {
   color: var(--text-gray);
   font-size: 12px;
+}
+
+.actus-friend-meta {
+  color: var(--text-light);
+  font-size: 11px;
+  margin-top: 3px;
+}
+
+.actus-friend-item {
+  padding: 14px 16px;
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+}
+
+.actus-friend-item.is-fresh {
+  background: linear-gradient(135deg, rgba(42, 171, 238, 0.11), rgba(42, 171, 238, 0.03));
+}
+
+.actus-friend-item.is-seen {
+  opacity: 0.88;
 }
 
 .calls-link-icon,
@@ -1990,6 +2023,16 @@ a {
   border-radius: 0;
 }
 
+.privacy-page-box,
+.status-page-box,
+.full-screen-status-box {
+  width: min(100vw, 720px);
+  max-width: 100vw;
+  min-height: 100vh;
+  max-height: 100vh;
+  border-radius: 0;
+}
+
 .modal-header,
 .modal-footer {
   padding: 14px 18px;
@@ -2022,6 +2065,35 @@ a {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+.privacy-page-header,
+.status-page-header {
+  padding: 18px 20px;
+}
+
+.privacy-page-header h3,
+.status-page-header h3 {
+  flex: 1;
+  justify-content: flex-start;
+  font-size: 24px;
+  font-weight: 700;
+}
+
+.privacy-page-header h3 i,
+.status-page-header h3 i {
+  color: inherit;
+}
+
+.privacy-page-body,
+.status-page-body {
+  padding: 0;
+  background: #0b1015;
+}
+
+.privacy-save-btn {
+  padding: 8px 14px;
+  border-radius: 999px;
 }
 
 .modal-footer {
@@ -2069,8 +2141,13 @@ a {
 
 .toggle-switch input {
   opacity: 0;
-  width: 0;
-  height: 0;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  cursor: pointer;
+  z-index: 2;
 }
 
 .toggle-slider {
@@ -2227,6 +2304,96 @@ a {
   font-size: 12px;
 }
 
+.privacy-sheet {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px 32px;
+}
+
+.privacy-sheet-head {
+  padding: 22px 18px;
+  border-radius: 28px;
+  background: linear-gradient(135deg, rgba(7, 93, 67, 0.98), rgba(13, 72, 55, 0.98));
+  border: 1px solid rgba(24, 154, 98, 0.28);
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.privacy-sheet-head strong {
+  display: block;
+  font-size: 17px;
+  margin-bottom: 6px;
+}
+
+.privacy-hero-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 14px;
+  display: grid;
+  place-items: center;
+  color: #32d96b;
+  font-size: 28px;
+}
+
+.privacy-hero-link {
+  margin-top: 12px;
+  color: #32d96b;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.privacy-sheet-head small,
+.privacy-footnote {
+  color: var(--text-gray);
+  font-size: 12px;
+}
+
+.privacy-sheet-head small {
+  color: rgba(255, 255, 255, 0.82);
+  display: block;
+}
+
+.privacy-section-title {
+  padding: 10px 4px 0;
+  color: var(--text-gray);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.privacy-option-card {
+  padding: 18px 0;
+  border-radius: 0;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.privacy-option-copy strong {
+  display: block;
+  font-size: 18px;
+  font-weight: 500;
+  margin-bottom: 4px;
+}
+
+.privacy-option-copy small {
+  color: var(--text-gray);
+  font-size: 12px;
+}
+
+.privacy-option-card .modal-input {
+  margin-top: 12px;
+  border-radius: 18px;
+}
+
+.privacy-switch-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
 .profile-stats-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -2346,15 +2513,113 @@ a {
   padding: 4px;
 }
 
+.status-page-list {
+  padding: 0 0 8px;
+  gap: 0;
+}
+
+.my-status-item {
+  gap: 14px;
+  padding: 18px 18px;
+  border-radius: 0;
+  background: transparent;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.my-status-avatar {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.my-status-copy {
+  flex: 1;
+  min-width: 0;
+}
+
+.my-status-title {
+  font-size: 18px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.my-status-menu {
+  color: var(--text-light);
+}
+
+.status-note-card {
+  display: flex;
+  gap: 12px;
+  padding: 18px 20px;
+  color: var(--text-gray);
+  line-height: 1.4;
+}
+
+.status-note-card i,
+.status-note-card strong {
+  color: #28d760;
+}
+
+.status-composer-sheet {
+  margin: 0 16px 120px;
+  padding: 16px;
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+}
+
+.status-floating-actions {
+  position: fixed;
+  right: max(16px, env(safe-area-inset-right));
+  bottom: calc(18px + env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  z-index: 2;
+}
+
+.status-fab {
+  width: 70px;
+  height: 70px;
+  border: none;
+  border-radius: 24px;
+  box-shadow: var(--shadow-lg);
+  font-size: 26px;
+}
+
+.status-fab.secondary {
+  width: 58px;
+  height: 58px;
+  align-self: flex-end;
+  border-radius: 20px;
+  background: #1b242b;
+  color: #fff;
+}
+
+.status-fab.primary {
+  background: #f3f4f6;
+  color: #0b1015;
+}
+
 .status-viewer-body {
   padding: 0;
+  background: #000;
+  position: relative;
 }
 
 .status-progress-bars {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(28px, 1fr));
   gap: 6px;
-  padding: 14px 16px 0;
+  padding: 10px 12px 0;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 3;
 }
 
 .status-progress-bars span {
@@ -2368,38 +2633,105 @@ a {
   background: rgba(255, 255, 255, 0.92);
 }
 
-.status-viewer-meta {
-  padding: 14px 16px;
-  border-bottom: 1px solid var(--border);
+.status-viewer-topbar {
+  position: absolute;
+  top: 18px;
+  left: 0;
+  right: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 12px 8px;
+}
+
+.status-viewer-identity {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.status-viewer-identity img {
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  object-fit: cover;
 }
 
 .status-meta-title {
-  font-size: 14px;
+  font-size: 18px;
   font-weight: 800;
 }
 
+.status-viewer-subtitle,
+.status-viewer-topbar .status-meta-sub {
+  color: rgba(255, 255, 255, 0.8);
+}
+
 .status-viewer-content {
-  min-height: 260px;
+  min-height: 100vh;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 20px;
+  padding: 0;
   text-align: center;
+  cursor: pointer;
+}
+
+.status-viewer-content img,
+.status-viewer-content video {
+  width: 100%;
+  height: 100vh;
+  object-fit: cover;
+}
+
+.status-viewer-caption {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(90px + env(safe-area-inset-bottom));
+  padding: 18px 20px;
+  color: #fff;
+  font-size: 18px;
+  line-height: 1.35;
+  background: linear-gradient(180deg, transparent, rgba(0, 0, 0, 0.68));
+  z-index: 2;
 }
 
 .status-viewer-actions {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
   display: flex;
-  gap: 10px;
-  padding: 0 16px 18px;
+  justify-content: space-around;
+  gap: 12px;
+  padding: 16px 10px calc(16px + env(safe-area-inset-bottom));
+  background: linear-gradient(180deg, transparent, rgba(0, 0, 0, 0.9));
+  z-index: 3;
 }
 
-.status-viewer-actions button {
-  flex: 1;
+.status-action-btn {
+  border: none;
+  background: transparent;
+  color: #fff;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  font-size: 16px;
+}
+
+.status-action-btn span {
+  font-size: 14px;
 }
 
 .status-text-card {
   color: #fff;
+  padding: 140px 26px 140px;
 }
 
 .msg-context-menu {

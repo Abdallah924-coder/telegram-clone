@@ -13,6 +13,8 @@ tls.createSecureContext = (opts = {}) => {
     return _origCreate(opts);
 };
 
+require('dotenv').config();
+
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
@@ -115,7 +117,7 @@ function normalizeStandalonePhone(value) {
 }
 
 function defaultData() {
-    return { users: [], messages: [], groups: [], statuses: [], sessions: [] };
+    return { users: [], messages: [], groups: [], statuses: [], sessions: [], otpStates: [] };
 }
 
 function copyMissingFiles(sourceDir, targetDir) {
@@ -212,8 +214,16 @@ function ensureGroupDefaults(group) {
     group.isUpdatesChannel = !!group.isUpdatesChannel;
     group.joinByPrompt = !!group.joinByPrompt;
     group.systemKey = group.systemKey || null;
+    group.inviteToken = String(group.inviteToken || '').trim() || crypto.randomBytes(8).toString('hex');
+    group.inviteUpdatedAt = group.inviteUpdatedAt || new Date().toISOString();
     group.avatar = group.avatar || `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(group.name || 'Group')}&backgroundColor=2aabee`;
     return group;
+}
+
+function groupInviteUrl(group) {
+    if (!group) return '';
+    const baseUrl = process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || '';
+    return `${baseUrl}/?invite=${encodeURIComponent(group.id)}:${encodeURIComponent(group.inviteToken || '')}`;
 }
 
 function getUserPhone(user) {
@@ -292,7 +302,17 @@ function currentDataSnapshot() {
             token,
             pseudo: session?.pseudo || '',
             expiresAt: Number(session?.expiresAt || 0)
-        })).filter(session => session.token && session.pseudo && session.expiresAt > Date.now())
+        })).filter(session => session.token && session.pseudo && session.expiresAt > Date.now()),
+        otpStates: [...pendingOtps.entries()].map(([key, state]) => ({
+            key,
+            otp: state?.otp || '',
+            email: state?.email || '',
+            purpose: state?.purpose || '',
+            payload: state?.payload || {},
+            expiresAt: Number(state?.expiresAt || 0),
+            lastSentAt: Number(state?.lastSentAt || 0),
+            attempts: Number(state?.attempts || 0)
+        })).filter(item => item.key && item.otp && item.expiresAt > Date.now())
     };
 }
 
@@ -334,6 +354,23 @@ async function loadInitialData() {
 
     ensureStorageBootstrap();
     return loadData();
+}
+
+function restoreOtpState(loaded) {
+    const entries = Array.isArray(loaded?.otpStates) ? loaded.otpStates : [];
+    pendingOtps = new Map(
+        entries
+            .filter(item => item?.key && item?.otp && Number(item?.expiresAt || 0) > Date.now())
+            .map(item => [String(item.key), {
+                otp: String(item.otp),
+                email: String(item.email || ''),
+                purpose: String(item.purpose || ''),
+                payload: item.payload || {},
+                expiresAt: Number(item.expiresAt),
+                lastSentAt: Number(item.lastSentAt || 0),
+                attempts: Number(item.attempts || 0)
+            }])
+    );
 }
 
 function saveData() {
@@ -620,6 +657,7 @@ function issueOtpForEmail(purpose, email, payload = {}) {
         attempts: 0
     });
     console.log(`[OTP ${purpose}] ${normalizedEmail}: ${otp}`);
+    saveData();
     return { otp, key };
 }
 
@@ -631,10 +669,32 @@ function verifyOtpForEmail(purpose, email, otp) {
     if (String(state.otp) !== String(otp || '').trim()) {
         state.attempts = (state.attempts || 0) + 1;
         if (state.attempts >= 5) pendingOtps.delete(key);
+        saveData();
         return { ok: false, error: 'Code OTP invalide' };
     }
     pendingOtps.delete(key);
+    saveData();
     return { ok: true, payload: state.payload || {} };
+}
+
+function isProductionEnv() {
+    return process.env.NODE_ENV === 'production';
+}
+
+async function deliverOtpOrFallback({ purpose, email, otp, pseudo }) {
+    if (!BREVO_API_KEY) {
+        if (isProductionEnv()) throw new Error('Configuration email manquante');
+        console.warn(`[OTP ${purpose}] Envoi email ignoré en dev: clé Brevo absente`);
+        return { delivered: false, fallback: true };
+    }
+    try {
+        await sendOtpEmail({ purpose, email, otp, pseudo });
+        return { delivered: true, fallback: false };
+    } catch (err) {
+        if (isProductionEnv()) throw err;
+        console.warn(`[OTP ${purpose}] Envoi email échoué en dev: ${err.message}`);
+        return { delivered: false, fallback: true, error: err };
+    }
 }
 
 function safeStatus(status, viewerPseudo) {
@@ -1088,7 +1148,7 @@ io.on('connection', (socket) => {
                 pseudo: normalizedPseudo,
                 phoneNumber: normalizedPhone
             });
-            await sendOtpEmail({
+            const delivery = await deliverOtpOrFallback({
                 purpose: 'register',
                 email: normalizedEmail,
                 otp,
@@ -1096,8 +1156,8 @@ io.on('connection', (socket) => {
             });
             callback?.({
                 success: true,
-                message: 'Code OTP envoyé',
-                ...(process.env.NODE_ENV === 'production' ? {} : { devOtp: otp })
+                message: delivery.delivered ? 'Code OTP envoyé' : 'Code OTP généré localement',
+                ...(isProductionEnv() ? {} : { devOtp: otp })
             });
         } catch (err) {
             if (!String(err.message || '').startsWith('Réessayez dans ')) {
@@ -1120,7 +1180,7 @@ io.on('connection', (socket) => {
         }
         try {
             const { otp } = issueOtpForEmail('reset', normalizedEmail, { pseudo: user.pseudo });
-            await sendOtpEmail({
+            const delivery = await deliverOtpOrFallback({
                 purpose: 'reset',
                 email: normalizedEmail,
                 otp,
@@ -1128,8 +1188,8 @@ io.on('connection', (socket) => {
             });
             callback?.({
                 success: true,
-                message: 'Code OTP envoyé',
-                ...(process.env.NODE_ENV === 'production' ? {} : { devOtp: otp })
+                message: delivery.delivered ? 'Code OTP envoyé' : 'Code OTP généré localement',
+                ...(isProductionEnv() ? {} : { devOtp: otp })
             });
         } catch (err) {
             if (!String(err.message || '').startsWith('Réessayez dans ')) {
@@ -1446,16 +1506,18 @@ io.on('connection', (socket) => {
             avatar: avatar || `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(groupName)}&backgroundColor=2aabee`,
             createdAt: new Date().toISOString()
         });
+        group.inviteToken = crypto.randomBytes(8).toString('hex');
+        group.inviteUpdatedAt = new Date().toISOString();
         groups.push(group);
         saveData();
         group.members.forEach(member => {
             const sid = _getSocketId(member);
             if (sid) io.to(sid).emit('group-created', group);
         });
-        callback?.({ success: true, group });
+        callback?.({ success: true, group, inviteUrl: groupInviteUrl(group) });
     });
 
-    socket.on('update-group-profile', ({ groupId, name, description, avatar }, callback) => {
+    socket.on('update-group-profile', ({ groupId, name, description, avatar, isPublic }, callback) => {
         const from = socketUsers[socket.id];
         const group = groups.find(item => item.id === groupId);
         if (!group || !group.admins.includes(from)) return callback?.({ success: false, error: 'Non autorise' });
@@ -1463,13 +1525,28 @@ io.on('connection', (socket) => {
         if (name) group.name = String(name).trim();
         if (description !== undefined) group.description = description;
         if (avatar) group.avatar = avatar;
+        if (isPublic !== undefined) group.isPublic = !!isPublic;
         ensureGroupDefaults(group);
         saveData();
         group.members.forEach(member => {
             const sid = _getSocketId(member);
             if (sid) io.to(sid).emit('group-updated', group);
         });
-        callback?.({ success: true, group });
+        callback?.({ success: true, group, inviteUrl: groupInviteUrl(group) });
+    });
+
+    socket.on('reset-group-invite', ({ groupId }, callback) => {
+        const from = socketUsers[socket.id];
+        const group = groups.find(item => item.id === groupId);
+        if (!group || !group.admins.includes(from)) return callback?.({ success: false, error: 'Non autorisé' });
+        group.inviteToken = crypto.randomBytes(8).toString('hex');
+        group.inviteUpdatedAt = new Date().toISOString();
+        saveData();
+        group.members.forEach(member => {
+            const sid = _getSocketId(member);
+            if (sid) io.to(sid).emit('group-updated', group);
+        });
+        callback?.({ success: true, group, inviteUrl: groupInviteUrl(group) });
     });
 
     socket.on('add-member', ({ groupId, pseudo }, callback) => {
@@ -1849,10 +1926,13 @@ io.on('connection', (socket) => {
         callback(publicGroups);
     });
 
-    socket.on('join-public-group', ({ groupId }, callback) => {
+    socket.on('join-public-group', ({ groupId, inviteToken }, callback) => {
         const from = socketUsers[socket.id];
         const group = groups.find(g => g.id === groupId);
-        if (!group || !group.isPublic) return callback?.({ success: false, error: 'Groupe introuvable' });
+        if (!group) return callback?.({ success: false, error: 'Groupe introuvable' });
+        if (!group.isPublic && String(inviteToken || '').trim() !== String(group.inviteToken || '').trim()) {
+            return callback?.({ success: false, error: 'Lien d’invitation invalide' });
+        }
         if (group.banned?.includes(from)) return callback?.({ success: false, error: 'Vous êtes banni' });
         if (!group.members.includes(from)) {
             group.members.push(from);
@@ -1863,7 +1943,7 @@ io.on('connection', (socket) => {
             });
         }
         socket.emit('group-created', group);
-        callback?.({ success: true, group });
+        callback?.({ success: true, group, inviteUrl: groupInviteUrl(group) });
     });
 
     socket.on('disconnect', () => {
@@ -1895,6 +1975,7 @@ async function bootstrap() {
     }
 
     const loaded = await loadInitialData();
+    restoreOtpState(loaded);
     loaded.users.forEach(user => {
         persistentUsers[user.pseudo] = ensureUserDefaults(user);
     });

@@ -42,6 +42,10 @@ let selectedMessageIds = new Set();
 let activeCall = null;
 let pendingIncomingCall = null;
 let callHistory = [];
+let pendingInviteContext = null;
+let qrScannerStream = null;
+let qrScanRaf = 0;
+let qrBarcodeDetector = null;
 
 function normalizeCallHistory(entries) {
     if (!Array.isArray(entries)) return [];
@@ -60,6 +64,191 @@ function normalizeCallHistory(entries) {
             joinedParticipants: Array.isArray(entry.joinedParticipants) ? entry.joinedParticipants : []
         }))
         .slice(0, 25);
+}
+
+function parseInviteParam(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return null;
+    const [groupIdPart, tokenPart] = raw.split(':');
+    const groupId = decodeURIComponent(groupIdPart || '').trim();
+    const inviteToken = decodeURIComponent(tokenPart || '').trim();
+    if (!groupId || !inviteToken) return null;
+    return { groupId, inviteToken };
+}
+
+function readPendingInviteFromUrl() {
+    try {
+        const params = new URLSearchParams(window.location.search);
+        return parseInviteParam(params.get('invite'));
+    } catch (err) {
+        return null;
+    }
+}
+
+function clearInviteParamFromUrl() {
+    try {
+        const url = new URL(window.location.href);
+        url.searchParams.delete('invite');
+        const next = `${url.pathname}${url.search}${url.hash}`;
+        window.history.replaceState({}, '', next);
+    } catch (err) {
+        // Ignore URL cleanup failures.
+    }
+}
+
+function buildProfileQrPayload() {
+    const params = new URLSearchParams();
+    params.set('pseudo', currentUser?.pseudo || '');
+    if (currentUser?.phoneNumber) params.set('phone', currentUser.phoneNumber);
+    if (currentUser?.avatar) params.set('avatar', currentUser.avatar);
+    return `devchat://contact?${params.toString()}`;
+}
+
+function buildQrImageUrl(text) {
+    if (typeof qrcode !== 'function') return '';
+    const qr = qrcode(0, 'M');
+    qr.addData(String(text || ''));
+    qr.make();
+    return qr.createDataURL(8, 12);
+}
+
+function parseScannedQrPayload(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return null;
+
+    const inviteFromUrl = (() => {
+        try {
+            const url = new URL(raw, window.location.origin);
+            return parseInviteParam(url.searchParams.get('invite'));
+        } catch (err) {
+            return null;
+        }
+    })();
+    if (inviteFromUrl) return { type: 'invite', ...inviteFromUrl };
+
+    if (raw.startsWith('devchat://contact?')) {
+        const query = raw.split('?')[1] || '';
+        const params = new URLSearchParams(query);
+        return {
+            type: 'contact',
+            pseudo: String(params.get('pseudo') || '').trim(),
+            phone: String(params.get('phone') || '').trim(),
+            avatar: String(params.get('avatar') || '').trim()
+        };
+    }
+
+    const directInvite = parseInviteParam(raw);
+    if (directInvite) return { type: 'invite', ...directInvite };
+    return null;
+}
+
+function ensureQrDetector() {
+    if (!('BarcodeDetector' in window)) return null;
+    if (!qrBarcodeDetector) qrBarcodeDetector = new BarcodeDetector({ formats: ['qr_code'] });
+    return qrBarcodeDetector;
+}
+
+function getQrImageDataFromSource(source) {
+    const canvas = $('qrScannerCanvas');
+    if (!canvas) throw new Error('Canvas QR introuvable');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const width = source.videoWidth || source.naturalWidth || source.width;
+    const height = source.videoHeight || source.naturalHeight || source.height;
+    if (!width || !height) throw new Error('Source QR illisible');
+    canvas.width = width;
+    canvas.height = height;
+    ctx.drawImage(source, 0, 0, width, height);
+    return ctx.getImageData(0, 0, width, height);
+}
+
+function stopQrScanner() {
+    if (qrScanRaf) {
+        cancelAnimationFrame(qrScanRaf);
+        qrScanRaf = 0;
+    }
+    if (qrScannerStream) {
+        qrScannerStream.getTracks().forEach(track => track.stop());
+        qrScannerStream = null;
+    }
+    const video = $('qrScannerVideo');
+    if (video) video.srcObject = null;
+}
+
+function closeQrScannerModal() {
+    stopQrScanner();
+    closeModal('qrScannerModal');
+}
+
+function consumeGroupInvite(groupId, inviteToken, successMessage = 'Groupe rejoint') {
+    if (!groupId || !inviteToken) return;
+    socket.emit('join-public-group', { groupId, inviteToken }, (res) => {
+        if (!res?.success) {
+            showToast(res?.error || 'Invitation invalide');
+            return;
+        }
+        upsertGroup(res.group);
+        renderConversations();
+        openChat({
+            type: 'group',
+            id: res.group.id,
+            name: res.group.name,
+            avatar: res.group.avatar
+        });
+        clearInviteParamFromUrl();
+        pendingInviteContext = null;
+        showToast(successMessage);
+    });
+}
+
+function applyScannedQrPayload(payload) {
+    if (!payload) {
+        showToast('QR non reconnu');
+        return;
+    }
+    if (payload.type === 'invite') {
+        closeQrScannerModal();
+        consumeGroupInvite(payload.groupId, payload.inviteToken, 'Invitation acceptée');
+        return;
+    }
+    if (payload.type === 'contact') {
+        closeQrScannerModal();
+        if (payload.pseudo && payload.pseudo === currentUser?.pseudo) {
+            showToast('Ceci est votre propre QR');
+            return;
+        }
+        if (payload.phone) {
+            addContactByPhone(payload.phone, (res) => {
+                const matched = res?.contactUser;
+                if (matched?.pseudo) {
+                    openChat({
+                        type: 'private',
+                        id: matched.pseudo,
+                        name: matched.contactName || matched.pseudo,
+                        avatar: matched.avatar || payload.avatar || dicebear(matched.pseudo)
+                    });
+                } else if (payload.pseudo) {
+                    openChat({
+                        type: 'private',
+                        id: payload.pseudo,
+                        name: payload.pseudo,
+                        avatar: payload.avatar || dicebear(payload.pseudo)
+                    });
+                }
+            });
+            return;
+        }
+        if (payload.pseudo) {
+            closeQrScannerModal();
+            openChat({
+                type: 'private',
+                id: payload.pseudo,
+                name: payload.pseudo,
+                avatar: payload.avatar || dicebear(payload.pseudo)
+            });
+            return;
+        }
+    }
+    showToast('QR non pris en charge');
 }
 
 function persistCallHistory() {
@@ -110,6 +299,21 @@ function persistSessionAuth(session) {
 
 function clearSessionAuth() {
     localStorage.removeItem('devchat_auth');
+}
+
+function getReadReceiptsEnabled() {
+    const stored = localStorage.getItem('devchat_read_receipts');
+    return stored === null ? true : stored === '1';
+}
+
+function setReadReceiptsEnabled(enabled) {
+    localStorage.setItem('devchat_read_receipts', enabled ? '1' : '0');
+}
+
+function shouldEmitReadReceipt(message) {
+    if (!message) return false;
+    if (message.type === 'group') return true;
+    return getReadReceiptsEnabled();
 }
 
 const EPHEMERAL_CHOICES = [
@@ -260,7 +464,7 @@ function addContactByPhone(phoneNumber, onSuccess) {
         if (!res?.success) return showToast(res?.error || 'Erreur');
         currentUser = res.user;
         renderContactsList();
-        if (typeof onSuccess === 'function') onSuccess();
+        if (typeof onSuccess === 'function') onSuccess(res);
         showToast('Contact ajouté');
     });
 }
@@ -529,6 +733,14 @@ function onAuthSuccess(res) {
             showToast('Ajoutez votre numero principal dans le profil pour activer les statuts prives');
         }
         flushPendingRegistrationAvatar();
+        pendingInviteContext = pendingInviteContext || readPendingInviteFromUrl();
+        if (pendingInviteContext) {
+            setTimeout(() => consumeGroupInvite(
+                pendingInviteContext.groupId,
+                pendingInviteContext.inviteToken,
+                'Invitation détectée'
+            ), 250);
+        }
     });
 }
 
@@ -1054,7 +1266,8 @@ function openChat(chat) {
         .map(m => m.id);
     if (unread.length) {
         markMessagesAsReadLocally(unread);
-        socket.emit('mark-read', { messageIds: unread });
+        const receiptEligible = unread.filter(id => shouldEmitReadReceipt(conversations.find(message => message.id === id)));
+        if (receiptEligible.length) socket.emit('mark-read', { messageIds: receiptEligible });
         renderConversations();
     }
 
@@ -2097,6 +2310,17 @@ $('createGroupBtn').addEventListener('click', () => {
             upsertGroup(res.group);
             closeModal('newGroupModal');
             openChat({ type: 'group', id: res.group.id, name: res.group.name, avatar: res.group.avatar });
+            if (res.inviteUrl) {
+                if (navigator.clipboard?.writeText) {
+                    navigator.clipboard.writeText(res.inviteUrl).then(() => {
+                        showToast('Groupe créé, lien d’invitation copié');
+                    }).catch(() => {
+                        showToast('Groupe créé, lien disponible dans la gestion du groupe');
+                    });
+                } else {
+                    showToast('Groupe créé, lien disponible dans la gestion du groupe');
+                }
+            }
             selectedMembers = [];
             $('groupName').value = '';
             $('groupDesc').value = '';
@@ -2140,12 +2364,12 @@ function openExploreModal() {
         });
     });
 }
-function joinPublicGroup(groupId, name, avatar) {
-    socket.emit('join-public-group', { groupId }, (res) => {
+function joinPublicGroup(groupId, name, avatar, inviteToken = '') {
+    socket.emit('join-public-group', { groupId, inviteToken }, (res) => {
         if (res.success) {
             upsertGroup(res.group);
             closeModal('exploreModal');
-            openChat({ type: 'group', id: groupId, name, avatar });
+            openChat({ type: 'group', id: res.group.id, name: res.group.name || name, avatar: res.group.avatar || avatar });
             renderConversations();
         } else showToast(res.error || 'Erreur');
     });
@@ -2275,6 +2499,30 @@ function openProfileModal() {
     requestAppStats();
     openModal('profileModal');
 }
+
+function openPrivacyModal() {
+    if (!currentUser) return;
+    $('privacyPageProfilePhoto').value = currentUser.privacy?.profilePhoto || 'everyone';
+    $('privacyPagePresence').value = currentUser.privacy?.presence || 'contacts';
+    $('privacyPagePhone').value = currentUser.privacy?.phone || 'contacts';
+    $('privacyPageStatus').value = currentUser.privacy?.status || 'mutual-contacts';
+    $('privacyReadReceipts').checked = getReadReceiptsEnabled();
+    openModal('privacyModal');
+}
+
+$('desktopPrivacyBtn')?.addEventListener('click', openPrivacyModal);
+$('settingsQrBtn').addEventListener('click', () => {
+    const qrText = buildProfileQrPayload();
+    $('profileQrImage').src = buildQrImageUrl(qrText);
+    $('profileQrText').textContent = currentUser?.phoneNumber
+        ? `Partagez ce QR pour être ajouté via ${formatPhoneNumber(currentUser.phoneNumber)}.`
+        : 'Ce QR ouvre votre profil DevChat. Ajoutez un numéro principal pour un ajout direct au répertoire.';
+    openModal('profileQrModal');
+});
+$('scanQrBtn').addEventListener('click', () => {
+    closeModal('profileQrModal');
+    openModal('qrScannerModal');
+});
 $('changeAvatarBtn').addEventListener('click', () => $('profileAvatarFile').click());
 $('profileAvatarFile').addEventListener('change', async (e) => {
     const file = e.target.files[0];
@@ -2350,6 +2598,37 @@ $('enableNotificationsBtn').addEventListener('click', async () => {
     }
 });
 
+$('savePrivacyBtn').addEventListener('click', () => {
+    if (!currentUser) return;
+    const privacy = {
+        profilePhoto: $('privacyPageProfilePhoto').value,
+        presence: $('privacyPagePresence').value,
+        phone: $('privacyPagePhone').value,
+        status: $('privacyPageStatus').value
+    };
+    const payload = {
+        avatar: currentUser.avatar,
+        bio: currentUser.bio || '',
+        privacy
+    };
+    if (currentUser.email) payload.email = currentUser.email;
+    if (currentUser.phoneCountryCode || currentUser.phoneLocalNumber) {
+        payload.countryCode = currentUser.phoneCountryCode || '+242';
+        payload.phoneNumber = currentUser.phoneLocalNumber || '';
+    }
+    socket.emit('update-profile', payload, (res) => {
+        if (!res?.success) return showToast(res?.error || 'Erreur');
+        setReadReceiptsEnabled($('privacyReadReceipts').checked);
+        syncCurrentUser(res.user);
+        if ($('privacyProfilePhoto')) $('privacyProfilePhoto').value = privacy.profilePhoto;
+        if ($('privacyPresence')) $('privacyPresence').value = privacy.presence;
+        if ($('privacyPhone')) $('privacyPhone').value = privacy.phone;
+        if ($('privacyStatus')) $('privacyStatus').value = privacy.status;
+        closeModal('privacyModal');
+        showToast('Confidentialité mise à jour');
+    });
+});
+
 // ── Manage Group ───────────────────────────────────────────────
 function openManageGroupModal() {
     if (!currentChat || currentChat.type !== 'group') return;
@@ -2359,6 +2638,8 @@ function openManageGroupModal() {
     $('manageGroupAvatarPreview').innerHTML = `<img src="${group.avatar}" alt="">`;
     $('manageGroupName').value = group.name || '';
     $('manageGroupDesc').value = group.description || '';
+    $('manageGroupPublic').checked = !!group.isPublic;
+    $('manageGroupInviteLink').value = `${window.location.origin}/?invite=${encodeURIComponent(group.id)}:${encodeURIComponent(group.inviteToken || '')}`;
     const list = $('manageMembersList');
     list.innerHTML = '';
     group.members.forEach(pseudo => {
@@ -2400,7 +2681,8 @@ $('saveGroupProfileBtn').addEventListener('click', () => {
         groupId: currentChat.id,
         name: $('manageGroupName').value.trim(),
         description: $('manageGroupDesc').value.trim(),
-        avatar: manageGroupAvatarUrl
+        avatar: manageGroupAvatarUrl,
+        isPublic: $('manageGroupPublic').checked
     }, (res) => {
         if (!res?.success) return showToast(res?.error || 'Erreur');
         upsertGroup(res.group);
@@ -2408,8 +2690,32 @@ $('saveGroupProfileBtn').addEventListener('click', () => {
         currentChat.avatar = res.group.avatar;
         $('currentChatName').textContent = res.group.name;
         $('chatAvatar').src = res.group.avatar;
+        $('manageGroupPublic').checked = !!res.group.isPublic;
+        $('manageGroupInviteLink').value = res.inviteUrl || $('manageGroupInviteLink').value;
         renderConversations();
         showToast('Profil du groupe mis à jour');
+    });
+});
+$('copyGroupInviteBtn').addEventListener('click', async () => {
+    const input = $('manageGroupInviteLink');
+    if (!input?.value) return showToast('Lien indisponible');
+    try {
+        await navigator.clipboard.writeText(input.value);
+        showToast('Lien copié');
+    } catch (err) {
+        input.focus();
+        input.select();
+        document.execCommand('copy');
+        showToast('Lien copié');
+    }
+});
+$('resetGroupInviteBtn').addEventListener('click', () => {
+    if (!currentChat || currentChat.type !== 'group') return;
+    socket.emit('reset-group-invite', { groupId: currentChat.id }, (res) => {
+        if (!res?.success) return showToast(res?.error || 'Erreur');
+        upsertGroup(res.group);
+        $('manageGroupInviteLink').value = res.inviteUrl || '';
+        showToast('Lien d’invitation réinitialisé');
     });
 });
 function banMember(pseudo) {
@@ -2501,7 +2807,7 @@ function renderMyStatuses() {
 
     list.innerHTML = '';
     if (!ownStatuses.length) {
-        list.innerHTML = '<div class="empty-state"><i class="fas fa-circle-notch"></i><p>Aucun statut actif</p></div>';
+        list.innerHTML = '<div class="empty-state"><i class="fas fa-circle-notch"></i><p>Aucun statut actif</p><small>Publiez un texte, une image ou une vidéo.</small></div>';
         return;
     }
 
@@ -2510,18 +2816,23 @@ function renderMyStatuses() {
         div.className = 'my-status-item';
         const textThumb = `<div class="my-status-thumb status-text-thumb" style="background:${statusBackgroundStyle(status.background)}">${escHtml((status.text || 'Texte').slice(0, 24))}</div>`;
         div.innerHTML = `
+            <img src="${currentUser.avatar}" class="my-status-avatar" alt="">
             ${status.mediaUrl
                 ? (status.fileType?.startsWith('video/')
                     ? `<video src="${status.mediaUrl}" muted></video>`
                     : `<img src="${status.mediaUrl}" alt="">`)
                 : textThumb
             }
-            <div style="flex:1">
-                <div>${escHtml(status.text || 'Statut média')}</div>
-                <div class="status-meta-sub">${formatTime(status.createdAt)} · ${status.viewedByCount || 0} vues · ${escHtml(currentUser?.privacy?.status || 'mutual-contacts')}</div>
+            <div class="my-status-copy">
+                <div class="my-status-title">${escHtml(status.text || 'Statut média')}</div>
+                <div class="status-meta-sub">${formatTime(status.createdAt)} · ${status.likedByCount || 0} ❤️</div>
             </div>
-            <button onclick="deleteStatus('${status.id}')"><i class="fas fa-trash"></i></button>
+            <button class="icon-btn my-status-menu" onclick="deleteStatus('${status.id}')"><i class="fas fa-ellipsis-v"></i></button>
         `;
+        div.addEventListener('click', (e) => {
+            if (e.target.closest('.my-status-menu')) return;
+            openStatusViewer(currentUser.pseudo);
+        });
         list.appendChild(div);
     });
 }
@@ -2553,36 +2864,33 @@ function renderActiveStatus() {
     if (!status) return;
     const contact = getRegisteredContacts().find(entry => entry.pseudo === status.userPseudo);
     $('statusProgressBars').innerHTML = activeStatusGroup.map((item, index) => `<span class="${index <= activeStatusIndex ? 'seen' : ''}"></span>`).join('');
-
-    $('statusViewerTitle').innerHTML = `<i class="fas fa-circle-notch"></i> ${escHtml(contact?.contactName || status.userPseudo)}`;
-    $('statusViewerMeta').innerHTML = `
-        <div class="status-meta-title">${escHtml(contact?.contactName || status.userPseudo)}</div>
-        <div class="status-meta-sub">Publié le ${new Date(status.createdAt).toLocaleString('fr-FR', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}</div>
-        <div class="status-meta-sub">Audience: ${escHtml(status.audience || 'contacts')}</div>
-        ${status.repostOf ? `<div class="status-meta-sub">Repartagé depuis ${escHtml(status.repostOf.userPseudo || '')}</div>` : ''}
-        ${status.seenBy?.length ? `<div class="status-meta-sub">Vu par: ${status.seenBy.map(user => escHtml(user.pseudo)).join(', ')}</div>` : ''}
-    `;
+    const viewerName = contact?.contactName || (status.userPseudo === currentUser?.pseudo ? 'Mon statut' : status.userPseudo);
+    const viewerAvatar = status.userPseudo === currentUser?.pseudo
+        ? currentUser.avatar
+        : (allUsers.find(user => user.pseudo === status.userPseudo)?.avatar || contact?.avatar || dicebear(status.userPseudo));
+    $('statusViewerAvatar').src = viewerAvatar;
+    $('statusViewerName').textContent = viewerName;
+    $('statusViewerSubtitle').textContent = `${formatTime(status.createdAt)}${status.userPseudo === currentUser?.pseudo ? ` · ${status.viewedByCount || 0} vues` : ''}`;
 
     const content = $('statusViewerContent');
+    const caption = $('statusViewerCaption');
     if (status.mediaUrl) {
         content.classList.remove('status-text-card');
         content.innerHTML = status.fileType?.startsWith('video/')
-            ? `<video src="${status.mediaUrl}" controls autoplay></video>`
+            ? `<video src="${status.mediaUrl}" autoplay controls playsinline></video>`
             : `<img src="${status.mediaUrl}" alt="">`;
-        if (status.text) {
-            const text = document.createElement('div');
-            text.className = 'status-viewer-text';
-            text.style.marginTop = '16px';
-            text.textContent = status.text;
-            content.appendChild(text);
-        }
+        caption.textContent = status.text || '';
+        caption.style.display = status.text ? 'block' : 'none';
     } else {
         content.classList.add('status-text-card');
         content.style.background = statusBackgroundStyle(status.background);
         content.innerHTML = `<div class="status-viewer-text">${escHtml(status.text || 'Statut')}</div>`;
+        caption.style.display = 'none';
     }
     if (status.mediaUrl) content.style.background = '';
-    $('likeStatusBtn').innerHTML = `${status.liked ? '<i class="fas fa-heart"></i>' : '<i class="far fa-heart"></i>'} ${status.likedByCount || 0} j'aime`;
+    $('likeStatusBtn').innerHTML = `<i class="fas fa-eye"></i><span>${status.viewedByCount || 0} vues</span>`;
+    $('repostStatusBtn').innerHTML = `${status.liked ? '<i class="fas fa-heart"></i>' : '<i class="far fa-heart"></i>'}<span>Booster</span>`;
+    $('shareStatusBtn').innerHTML = `<i class="fas fa-share-alt"></i><span>Partager</span>`;
 
     socket.emit('view-status', { statusId: status.id }, (res) => {
         if (res?.success && res.status) {
@@ -2597,12 +2905,10 @@ function renderActiveStatus() {
 $('likeStatusBtn').addEventListener('click', () => {
     const status = activeStatusGroup[activeStatusIndex];
     if (!status) return;
-    socket.emit('toggle-status-like', { statusId: status.id }, (res) => {
-        if (!res?.success) return showToast(res?.error || 'Erreur');
-        upsertStatus(res.status);
-        activeStatusGroup[activeStatusIndex] = res.status;
-        renderActiveStatus();
-    });
+    const viewers = Array.isArray(status.seenBy) && status.seenBy.length
+        ? status.seenBy.map(user => user.pseudo).join(', ')
+        : 'Aucune vue pour le moment';
+    showToast(viewers, 3500);
 });
 
 $('repostStatusBtn').addEventListener('click', () => {
@@ -2614,6 +2920,24 @@ $('repostStatusBtn').addEventListener('click', () => {
         renderMyStatuses();
         showToast('Statut repartagé');
     });
+});
+
+$('shareStatusBtn').addEventListener('click', async () => {
+    const status = activeStatusGroup[activeStatusIndex];
+    if (!status) return;
+    const shareText = status.text || 'Statut DevChat';
+    try {
+        if (navigator.share) {
+            await navigator.share({ title: 'Statut DevChat', text: shareText, url: status.mediaUrl || window.location.href });
+        } else if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(`${shareText}${status.mediaUrl ? ` ${status.mediaUrl}` : ''}`.trim());
+            showToast('Statut copié');
+        } else {
+            showToast('Partage indisponible');
+        }
+    } catch (err) {
+        if (err?.name !== 'AbortError') showToast('Partage annulé');
+    }
 });
 
 function deleteStatus(statusId) {
@@ -2654,7 +2978,7 @@ $('statusMediaInput').addEventListener('change', async (e) => {
     }
 });
 
-$('publishStatusBtn').addEventListener('click', () => {
+$('publishTextStatusFab').addEventListener('click', () => {
     const text = $('statusTextInput').value.trim();
     socket.emit('create-status', {
         text,
@@ -2677,16 +3001,99 @@ $('publishStatusBtn').addEventListener('click', () => {
     });
 });
 
-$('prevStatusBtn').addEventListener('click', () => {
+$('publishStatusBtn').addEventListener('click', () => $('pickStatusMediaBtn').click());
+$('statusComposerMoreBtn')?.addEventListener('click', () => showToast('Options de statut bientôt'));
+$('statusViewerMoreBtn')?.addEventListener('click', () => showToast('Options de statut bientôt'));
+$('statusViewerContent').addEventListener('click', (e) => {
     if (!activeStatusGroup.length) return;
-    activeStatusIndex = (activeStatusIndex - 1 + activeStatusGroup.length) % activeStatusGroup.length;
+    const rect = e.currentTarget.getBoundingClientRect();
+    if ((e.clientX - rect.left) < rect.width / 2) {
+        activeStatusIndex = (activeStatusIndex - 1 + activeStatusGroup.length) % activeStatusGroup.length;
+    } else {
+        activeStatusIndex = (activeStatusIndex + 1) % activeStatusGroup.length;
+    }
     renderActiveStatus();
 });
 
-$('nextStatusBtn').addEventListener('click', () => {
-    if (!activeStatusGroup.length) return;
-    activeStatusIndex = (activeStatusIndex + 1) % activeStatusGroup.length;
-    renderActiveStatus();
+async function scanQrFromSource(source) {
+    const detector = ensureQrDetector();
+    if (detector) {
+        try {
+            const results = await detector.detect(source);
+            const match = results.find(item => item.rawValue);
+            if (match?.rawValue) return match.rawValue;
+        } catch (err) {
+            // Fall through to jsQR local decoder.
+        }
+    }
+    if (typeof jsQR !== 'function') throw new Error('Scan QR non supporté sur cet appareil');
+    const imageData = getQrImageDataFromSource(source);
+    const result = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'attemptBoth' });
+    return result?.data || '';
+}
+
+async function startQrScanning() {
+    if (typeof jsQR !== 'function' && !ensureQrDetector()) {
+        $('qrScannerHint').textContent = 'Le scan QR n’est pas disponible ici.';
+        showToast('Scan QR non supporté sur cet appareil');
+        return;
+    }
+    stopQrScanner();
+    const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment' },
+        audio: false
+    });
+    qrScannerStream = stream;
+    $('qrScannerVideo').srcObject = stream;
+    $('qrScannerHint').textContent = 'Scannez un QR de contact ou un lien d’invitation de groupe.';
+    const loop = async () => {
+        const video = $('qrScannerVideo');
+        if (!video || video.readyState < 2) {
+            qrScanRaf = requestAnimationFrame(loop);
+            return;
+        }
+        try {
+            const text = await scanQrFromSource(video);
+            if (text) {
+                applyScannedQrPayload(parseScannedQrPayload(text));
+                return;
+            }
+        } catch (err) {
+            // Ignore transient detection errors while streaming.
+        }
+        qrScanRaf = requestAnimationFrame(loop);
+    };
+    qrScanRaf = requestAnimationFrame(loop);
+}
+
+$('startQrScanBtn').addEventListener('click', async () => {
+    if (!navigator.mediaDevices?.getUserMedia) {
+        $('qrScannerHint').textContent = 'Caméra indisponible sur cet appareil.';
+        return showToast('Caméra indisponible');
+    }
+    try {
+        await startQrScanning();
+    } catch (err) {
+        $('qrScannerHint').textContent = err.message || 'Impossible de démarrer la caméra.';
+        showToast(err.message || 'Impossible de démarrer la caméra');
+    }
+});
+
+$('qrImageInput').addEventListener('change', async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+        const bitmap = await createImageBitmap(file);
+        const text = await scanQrFromSource(bitmap);
+        bitmap.close?.();
+        if (!text) throw new Error('Aucun QR détecté dans cette image');
+        applyScannedQrPayload(parseScannedQrPayload(text));
+    } catch (err) {
+        $('qrScannerHint').textContent = err.message || 'Lecture du QR impossible.';
+        showToast(err.message || 'Lecture du QR impossible');
+    } finally {
+        e.target.value = '';
+    }
 });
 
 // ═══════════════════════════════════════════════════════════════
@@ -2711,7 +3118,7 @@ function setupSocketListeners() {
             if (relevant) {
                 if (msg.from !== currentUser.pseudo) {
                     markMessagesAsReadLocally([msg.id]);
-                    socket.emit('mark-read', { messageIds: [msg.id] });
+                    if (shouldEmitReadReceipt(msg)) socket.emit('mark-read', { messageIds: [msg.id] });
                 }
                 renderMessages();
             }
@@ -2974,7 +3381,11 @@ function setupSocketListeners() {
 //  MODAL HELPERS
 // ═══════════════════════════════════════════════════════════════
 function openModal(id) { $(id).classList.add('open'); $(id).style.display = 'flex'; }
-function closeModal(id) { $(id).classList.remove('open'); $(id).style.display = 'none'; }
+function closeModal(id) {
+    if (id === 'qrScannerModal') stopQrScanner();
+    $(id).classList.remove('open');
+    $(id).style.display = 'none';
+}
 
 document.querySelectorAll('.close-modal-btn').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -3193,6 +3604,9 @@ function switchTab(pageId, btn) {
     if ($('mobileSearchResultsPanel')) $('mobileSearchResultsPanel').style.display = 'none';
     if ($('conversationsListMobile')) $('conversationsListMobile').style.display = 'flex';
     // Page-specific refresh
+    if (pageId === 'pageDiscussions') {
+        renderConversations();
+    }
     if (pageId === 'pageActus')      refreshActusPage();
     if (pageId === 'pageParametres') initSettingsPage();
 }
@@ -3327,7 +3741,7 @@ function initMobileUI() {
 
     // Settings rows handlers
     const sp = $('settingsPrivacyBtn');
-    if (sp) sp.addEventListener('click', () => openProfileModal());
+    if (sp) sp.addEventListener('click', () => openPrivacyModal());
     const sn = $('settingsNotifBtn');
     if (sn) sn.addEventListener('click', () => showToast('Paramètres de notifications — bientôt'));
     const st = $('settingsThemeBtn');
@@ -3400,6 +3814,35 @@ function updateActusBadge() {
     badge.style.display = unseenContacts.size > 0 ? 'block' : 'none';
 }
 
+function renderActusStatusSection(title, entries, tone = 'recent') {
+    if (!entries.length) return '';
+    return `
+        <div class="actus-status-section">
+            <div class="actus-section-label ${tone === 'seen' ? 'is-seen' : ''}">${title}</div>
+            <div class="actus-status-stack">
+                ${entries.map(({ pseudo, statuses: sts }) => {
+                    const user = allUsers.find(u => u.pseudo === pseudo);
+                    const contact = getRegisteredContacts().find(entry => entry.pseudo === pseudo);
+                    const allSeen = sts.every(s => s.viewed);
+                    const latest = sts[0];
+                    return `
+                        <div class="actus-friend-item ${allSeen ? 'is-seen' : 'is-fresh'}" data-status-owner="${escHtml(pseudo)}">
+                            <div class="actus-friend-ring ${allSeen ? 'seen' : 'unseen'}">
+                                <img src="${user?.avatar || contact?.avatar || dicebear(pseudo)}" alt="">
+                            </div>
+                            <div class="actus-friend-info">
+                                <div class="actus-friend-name">${escHtml(contact?.contactName || pseudo)}</div>
+                                <div class="actus-friend-time">${timeAgo(latest.createdAt)}</div>
+                                <div class="actus-friend-meta">${sts.length} statut${sts.length > 1 ? 's' : ''} · ${allSeen ? 'vus' : 'nouveaux'}</div>
+                            </div>
+                        </div>
+                    `;
+                }).join('')}
+            </div>
+        </div>
+    `;
+}
+
 function renderActusFriends() {
     const list = $('actusFriendsList');
     if (!list) return;
@@ -3416,27 +3859,23 @@ function renderActusFriends() {
         list.innerHTML = '<div class="actus-empty-state"><i class="fas fa-circle-notch"></i><p>Aucun statut de vos contacts</p><small>Les statuts sont visibles uniquement entre contacts mutuels</small></div>';
         return;
     }
-    list.innerHTML = '';
+    const recentEntries = [];
+    const seenEntries = [];
     friendStatuses.forEach((sts, pseudo) => {
-        const user = allUsers.find(u => u.pseudo === pseudo);
-        const contact = getRegisteredContacts().find(entry => entry.pseudo === pseudo);
-        const allSeen = sts.every(s => s.viewed);
-        const latest  = sts[0];
-        const div = document.createElement('div');
-        div.className = 'actus-friend-item';
-        div.innerHTML = `
-            <div class="actus-friend-ring ${allSeen?'seen':'unseen'}">
-                <img src="${user?.avatar||contact?.avatar||dicebear(pseudo)}" alt="">
-            </div>
-            <div class="actus-friend-info">
-                <div class="actus-friend-name">${escHtml(contact?.contactName || pseudo)}</div>
-                <div class="actus-friend-time">${timeAgo(latest.createdAt)} · ${sts.length} statut${sts.length>1?'s':''}</div>
-            </div>
-        `;
-        div.addEventListener('click', () => {
-            openStatusViewer(pseudo);
-        });
-        list.appendChild(div);
+        const sortedStatuses = [...sts].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+        const allSeen = sortedStatuses.every(s => s.viewed);
+        (allSeen ? seenEntries : recentEntries).push({ pseudo, statuses: sortedStatuses });
+    });
+    recentEntries.sort((a, b) => new Date(b.statuses[0].createdAt) - new Date(a.statuses[0].createdAt));
+    seenEntries.sort((a, b) => new Date(b.statuses[0].createdAt) - new Date(a.statuses[0].createdAt));
+
+    list.innerHTML = [
+        renderActusStatusSection('Récentes', recentEntries, 'recent'),
+        renderActusStatusSection('Déjà vues', seenEntries, 'seen')
+    ].filter(Boolean).join('');
+
+    list.querySelectorAll('[data-status-owner]').forEach(node => {
+        node.addEventListener('click', () => openStatusViewer(node.dataset.statusOwner));
     });
 }
 
