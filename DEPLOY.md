@@ -14,6 +14,11 @@ L'application accepte ces variables pour stocker les donnees et medias sur un vo
 - `ADMIN_PSEUDO`
 - `ADMIN_PASSWORD`
 - `ADMIN_PHONE` ou `ADMIN_COUNTRY_CODE` + `ADMIN_PHONE_LOCAL`
+- `BREVO_API_KEY`
+- `BREVO_SENDER_EMAIL`
+- `BREVO_SENDER_NAME`
+- `BREVO_REPLY_TO_EMAIL` (optionnel)
+- `BREVO_REPLY_TO_NAME` (optionnel)
 
 ## Render
 
@@ -44,3 +49,4 @@ Configuration recommandee :
 
 - Avec MongoDB, seuls les medias restent sur le stockage disque si vous gardez les uploads locaux.
 - Sans MongoDB ni stockage persistant, les messages, statuts, avatars et fichiers uploades seront perdus au redeploiement ou au redemarrage.
+- L'envoi OTP par email utilise l'API HTTP Brevo si `BREVO_API_KEY` et `BREVO_SENDER_EMAIL` sont definis.

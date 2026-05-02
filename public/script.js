@@ -43,6 +43,63 @@ let activeCall = null;
 let pendingIncomingCall = null;
 let callHistory = [];
 
+function normalizeCallHistory(entries) {
+    if (!Array.isArray(entries)) return [];
+    return entries
+        .filter(entry => entry && entry.pseudo)
+        .map(entry => ({
+            pseudo: String(entry.pseudo || '').trim(),
+            avatar: String(entry.avatar || '').trim(),
+            mode: entry.mode === 'video' ? 'video' : 'audio',
+            direction: entry.direction === 'incoming' ? 'incoming' : 'outgoing',
+            status: String(entry.status || 'Terminé').trim() || 'Terminé',
+            date: entry.date || new Date().toISOString(),
+            startedAt: entry.startedAt || entry.date || new Date().toISOString(),
+            endedAt: entry.endedAt || entry.date || new Date().toISOString(),
+            durationMinutes: Number(entry.durationMinutes || 0),
+            joinedParticipants: Array.isArray(entry.joinedParticipants) ? entry.joinedParticipants : []
+        }))
+        .slice(0, 25);
+}
+
+function persistCallHistory() {
+    if (!socket.connected || !currentUser?.pseudo) return;
+    socket.emit('save-call-history', { entries: callHistory.slice(0, 25) }, (res) => {
+        if (res?.success && res.user) syncCurrentUser(res.user);
+    });
+}
+
+function getRegisteredContacts() {
+    return Array.isArray(currentUser?.contactUsers) ? currentUser.contactUsers : [];
+}
+
+function filteredRegisteredContacts(query = '') {
+    const q = String(query || '').trim().toLowerCase();
+    const digits = q.replace(/\D/g, '');
+    return getRegisteredContacts().filter(contact => {
+        if (!q) return true;
+        const name = String(contact.contactName || contact.pseudo || '').toLowerCase();
+        const pseudo = String(contact.pseudo || '').toLowerCase();
+        const phone = String(contact.phoneNumber || '').replace(/\D/g, '');
+        return name.includes(q) || pseudo.includes(q) || (digits && phone.includes(digits));
+    });
+}
+
+function parseManualContactsInput(raw) {
+    return String(raw || '')
+        .split('\n')
+        .map(line => line.trim())
+        .filter(Boolean)
+        .map(line => {
+            const [labelPart, phonePart] = line.includes(',') ? line.split(/,(.+)/) : ['', line];
+            return {
+                label: String(labelPart || '').trim(),
+                phoneNumber: String(phonePart || '').trim()
+            };
+        })
+        .filter(entry => entry.phoneNumber);
+}
+
 function persistSessionAuth(session) {
     if (!session?.pseudo || !session?.token) return;
     localStorage.setItem('devchat_auth', JSON.stringify({
@@ -293,7 +350,7 @@ function initCountrySelect(id, defaultCode = '+242') {
 }
 
 function initCountrySelectors() {
-    ['loginCountryCode', 'regCountryCode', 'resetCountryCode', 'profileCountryCode', 'contactCountryCode']
+    ['loginCountryCode', 'regCountryCode', 'resetCountryCode', 'profileCountryCode']
         .forEach(id => initCountrySelect(id));
 }
 
@@ -447,6 +504,7 @@ function onAuthSuccess(res) {
     statuses      = res.statuses || [];
     updateChannelInfo = res.updateChannel || null;
     authSessionToken = res.sessionToken || null;
+    callHistory = normalizeCallHistory(res.user?.callHistory);
     if (authSessionToken && currentUser?.pseudo) {
         persistSessionAuth({ pseudo: currentUser.pseudo, token: authSessionToken });
     }
@@ -632,7 +690,14 @@ function getVisibleConversations() {
 function syncCurrentUser(nextUser) {
     if (!nextUser) return;
     currentUser = { ...currentUser, ...nextUser };
+    if (Array.isArray(nextUser.callHistory)) {
+        callHistory = normalizeCallHistory(nextUser.callHistory);
+        renderCallsHistory();
+    }
     updateSidebarUser();
+    renderContactsList();
+    renderStatusStrip();
+    refreshActusPage();
 }
 
 function getEphemeralDurationForChat(pseudo) {
@@ -691,14 +756,15 @@ function renderStatusStrip() {
         .filter(group => group.userPseudo !== currentUser.pseudo)
         .forEach(group => {
             const user = allUsers.find(item => item.pseudo === group.userPseudo);
+            const contact = getRegisteredContacts().find(entry => entry.pseudo === group.userPseudo);
             const allViewed = group.items.every(item => item.viewed);
             const div = document.createElement('div');
             div.className = 'status-strip-item';
             div.innerHTML = `
                 <div class="status-ring-strip ${allViewed ? '' : 'has-status'}">
-                    <img src="${user?.avatar || dicebear(group.userPseudo)}" alt="">
+                    <img src="${user?.avatar || contact?.avatar || dicebear(group.userPseudo)}" alt="">
                 </div>
-                <span>${escHtml(group.userPseudo)}</span>
+                <span>${escHtml(contact?.contactName || group.userPseudo)}</span>
             `;
             div.addEventListener('click', () => openStatusViewer(group.userPseudo));
             strip.appendChild(div);
@@ -824,9 +890,10 @@ function renderConversations(filter = '') {
     let displayed = 0;
     const renderedEntries = [];
     sorted.forEach(entry => {
+        const contact = entry.type === 'private' ? getRegisteredContacts().find(item => item.pseudo === entry.id) : null;
         const name = entry.type === 'group'
             ? (groups.find(g => g.id === entry.id)?.name || entry.id)
-            : entry.id;
+            : (contact?.contactName || entry.id);
 
         if (filter && !name.toLowerCase().includes(filter.toLowerCase())) return;
 
@@ -895,9 +962,10 @@ function renderConversations(filter = '') {
         mobileList.querySelectorAll('.conv-item').forEach((el, i) => {
             const entry2 = renderedEntries[i];
             if (!entry2) return;
+            const contact2 = entry2.type === 'private' ? getRegisteredContacts().find(item => item.pseudo === entry2.id) : null;
             const name2 = entry2.type === 'group'
                 ? (groups.find(g => g.id === entry2.id)?.name || entry2.id)
-                : entry2.id;
+                : (contact2?.contactName || entry2.id);
             const user2  = allUsers.find(u => u.pseudo === entry2.id);
             const group2 = groups.find(g => g.id === entry2.id);
             const avatar2 = entry2.type === 'group' ? (group2?.avatar || dicebear(name2)) : (user2?.avatar || dicebear(name2));
@@ -934,7 +1002,7 @@ function openChat(chat) {
     // Status / dot
     const user = allUsers.find(u => u.pseudo === chat.id);
     if (chat.type === 'private') {
-        $('currentChatStatus').textContent = user?.online ? 'En ligne' : lastSeenText(user?.lastSeen);
+        $('currentChatStatus').textContent = user?.presenceHidden ? 'Présence masquée' : (user?.online ? 'En ligne' : lastSeenText(user?.lastSeen));
         $('chatOnlineDot').classList.toggle('show', !!user?.online);
         $('ctxSecretChat').style.display = 'flex';
         $('ctxViewProfile').style.display = 'flex';
@@ -1451,34 +1519,33 @@ $('sidebarSearch').addEventListener('input', (e) => {
         return;
     }
     searchDebounce = setTimeout(() => {
-        socket.emit('search-users', q, (results) => {
-            $('searchResultsPanel').style.display  = 'block';
-            $('conversationsList').style.display   = 'none';
-            const list = $('searchResultsList');
-            list.innerHTML = '';
-            if (!results.length) {
-                list.innerHTML = `<div class="empty-state" style="padding:24px"><i class="fas fa-user-slash"></i><p>Aucun utilisateur trouvé</p></div>`;
-                return;
-            }
-            results.forEach(u => {
-                const div = document.createElement('div');
-                div.className = 'search-result-item';
-                div.innerHTML = `
-                    <img src="${u.avatar || dicebear(u.pseudo)}" class="ri-avatar" alt="">
-                    <div class="ri-info">
-                        <div class="ri-name">${escHtml(u.pseudo)}</div>
-                        <div class="ri-sub">${escHtml(maskPhoneNumber(u.maskedPhoneNumber || ''))}</div>
-                        <div class="ri-sub">${u.online ? 'En ligne' : lastSeenText(u.lastSeen)}</div>
-                    </div>
-                `;
-                div.addEventListener('click', () => {
-                    $('sidebarSearch').value = '';
-                    $('searchResultsPanel').style.display = 'none';
-                    $('conversationsList').style.display  = 'block';
-                    openChat({ type: 'private', id: u.pseudo, name: u.pseudo, avatar: u.avatar });
-                });
-                list.appendChild(div);
+        const results = filteredRegisteredContacts(q);
+        $('searchResultsPanel').style.display  = 'block';
+        $('conversationsList').style.display   = 'none';
+        const list = $('searchResultsList');
+        list.innerHTML = '';
+        if (!results.length) {
+            list.innerHTML = `<div class="empty-state" style="padding:24px"><i class="fas fa-address-book"></i><p>Aucun contact enregistré trouvé</p></div>`;
+            return;
+        }
+        results.forEach(u => {
+            const div = document.createElement('div');
+            div.className = 'search-result-item';
+            div.innerHTML = `
+                <img src="${u.avatar || dicebear(u.contactName || u.pseudo)}" class="ri-avatar" alt="">
+                <div class="ri-info">
+                    <div class="ri-name">${escHtml(u.contactName || u.pseudo)}</div>
+                    <div class="ri-sub">${escHtml(u.phoneNumber || '')}</div>
+                    <div class="ri-sub">${u.presenceHidden ? 'Présence masquée' : (u.online ? 'En ligne' : lastSeenText(u.lastSeen))}</div>
+                </div>
+            `;
+            div.addEventListener('click', () => {
+                $('sidebarSearch').value = '';
+                $('searchResultsPanel').style.display = 'none';
+                $('conversationsList').style.display  = 'block';
+                openChat({ type: 'private', id: u.pseudo, name: u.contactName || u.pseudo, avatar: u.avatar || dicebear(u.contactName || u.pseudo) });
             });
+            list.appendChild(div);
         });
     }, 300);
 });
@@ -1555,10 +1622,13 @@ function _legacyOpenDrawerSection(section) {
 }
 
 $('logoutBtn').addEventListener('click', () => {
+    const token = authSessionToken;
     authSessionToken = null;
     clearSessionAuth();
-    socket.disconnect();
-    location.reload();
+    socket.emit('logout', { sessionToken: token }, () => {
+        socket.disconnect();
+        location.reload();
+    });
 });
 
 function renderCallsHistory() {
@@ -1577,17 +1647,26 @@ function renderCallsHistory() {
 
     list.innerHTML = '';
     callHistory.slice(0, 12).forEach(entry => {
+        const contact = getRegisteredContacts().find(item => item.pseudo === entry.pseudo);
+        const label = contact?.contactName || entry.pseudo;
         const row = document.createElement('div');
         row.className = 'call-item';
         row.innerHTML = `
             <img src="${entry.avatar || dicebear(entry.pseudo)}" class="call-item-av" alt="">
             <div class="call-item-info">
-                <div class="call-item-name">${escHtml(entry.pseudo)}</div>
+                <div class="call-item-name">${escHtml(label)}</div>
                 <div class="call-item-detail">${entry.direction === 'incoming' ? 'Reçu' : 'Sortant'} · ${entry.mode === 'video' ? 'Vidéo' : 'Audio'} · ${escHtml(entry.status)}</div>
+                <div class="call-item-detail">Début ${formatTime(entry.startedAt)} · Fin ${formatTime(entry.endedAt)} · ${entry.durationMinutes || 0} min</div>
+                <div class="call-item-detail">${entry.joinedParticipants?.length ? `Participants: ${escHtml(entry.joinedParticipants.join(', '))}` : 'Participants: -'}</div>
             </div>
-            <span class="call-item-detail">${formatTime(entry.date)}</span>
+            <button class="btn-secondary call-quick-btn">${contact?.online ? 'Rappeler' : 'Ouvrir'}</button>
         `;
-        row.addEventListener('click', () => openChat({ type: 'private', id: entry.pseudo, name: entry.pseudo, avatar: entry.avatar || dicebear(entry.pseudo) }));
+        row.addEventListener('click', () => openChat({ type: 'private', id: entry.pseudo, name: label, avatar: entry.avatar || dicebear(entry.pseudo) }));
+        row.querySelector('.call-quick-btn')?.addEventListener('click', (event) => {
+            event.stopPropagation();
+            openChat({ type: 'private', id: entry.pseudo, name: label, avatar: entry.avatar || dicebear(entry.pseudo) });
+            if (contact?.online) startCall(entry.mode || 'audio');
+        });
         list.appendChild(row);
     });
 }
@@ -1599,10 +1678,15 @@ function pushCallHistory(entry) {
         mode: entry.mode === 'video' ? 'video' : 'audio',
         direction: entry.direction === 'incoming' ? 'incoming' : 'outgoing',
         status: entry.status || 'Terminé',
-        date: new Date().toISOString()
+        date: new Date().toISOString(),
+        startedAt: entry.startedAt || new Date().toISOString(),
+        endedAt: entry.endedAt || new Date().toISOString(),
+        durationMinutes: Number(entry.durationMinutes || 0),
+        joinedParticipants: Array.isArray(entry.joinedParticipants) ? entry.joinedParticipants : []
     });
     callHistory = callHistory.slice(0, 25);
     renderCallsHistory();
+    persistCallHistory();
 }
 
 function updateCallControls() {
@@ -1675,6 +1759,8 @@ function createPeerConnection(call) {
         event.streams[0].getTracks().forEach(track => call.remoteStream.addTrack(track));
         attachCallStreams();
         call.status = 'Connecté';
+        if (!call.connectedAt) call.connectedAt = new Date().toISOString();
+        call.joinedParticipants = [...new Set([currentUser?.pseudo, call.pseudo].filter(Boolean))];
         updateCallControls();
     };
     pc.onicecandidate = event => {
@@ -1727,14 +1813,27 @@ async function startCall(mode) {
             localStream,
             remoteStream: null,
             pc: null,
-            muted: false
+            muted: false,
+            startedAt: new Date().toISOString(),
+            connectedAt: null,
+            joinedParticipants: [currentUser?.pseudo].filter(Boolean)
         };
         openCallModal();
         attachCallStreams();
         socket.emit('call-user', { to: currentChat.id, mode }, (res) => {
             if (!res?.success) {
                 showToast(res?.error || 'Appel impossible');
-                pushCallHistory({ pseudo: currentChat.id, avatar: currentChat.avatar, mode, direction: 'outgoing', status: 'Échec' });
+                pushCallHistory({
+                    pseudo: currentChat.id,
+                    avatar: currentChat.avatar,
+                    mode,
+                    direction: 'outgoing',
+                    status: 'Échec',
+                    startedAt: activeCall?.startedAt || new Date().toISOString(),
+                    endedAt: new Date().toISOString(),
+                    durationMinutes: 0,
+                    joinedParticipants: [currentUser?.pseudo].filter(Boolean)
+                });
                 resetActiveCallState();
             }
         });
@@ -1754,7 +1853,10 @@ async function acceptIncomingCall() {
             localStream,
             remoteStream: null,
             pc: null,
-            muted: false
+            muted: false,
+            startedAt: pendingIncomingCall.startedAt || new Date().toISOString(),
+            connectedAt: null,
+            joinedParticipants: [pendingIncomingCall.pseudo, currentUser?.pseudo].filter(Boolean)
         };
         pendingIncomingCall = null;
         openCallModal();
@@ -1774,7 +1876,11 @@ function declineIncomingCall(reason = 'Refusé') {
         avatar: pendingIncomingCall.avatar,
         mode: pendingIncomingCall.mode,
         direction: 'incoming',
-        status: reason
+        status: reason,
+        startedAt: pendingIncomingCall.startedAt || new Date().toISOString(),
+        endedAt: new Date().toISOString(),
+        durationMinutes: 0,
+        joinedParticipants: [pendingIncomingCall.pseudo]
     });
     pendingIncomingCall = null;
     closeCallModal();
@@ -1784,19 +1890,25 @@ function endCurrentCall(reason = 'Terminé') {
     if (pendingIncomingCall) return declineIncomingCall(reason);
     if (!activeCall) return closeCallModal();
     socket.emit('end-call', { to: activeCall.pseudo, reason });
+    const endedAt = new Date().toISOString();
+    const durationMinutes = activeCall.connectedAt ? Math.max(1, Math.round((new Date(endedAt) - new Date(activeCall.connectedAt)) / 60000)) : 0;
     pushCallHistory({
         pseudo: activeCall.pseudo,
         avatar: activeCall.avatar,
         mode: activeCall.mode,
         direction: activeCall.direction,
-        status: reason
+        status: reason,
+        startedAt: activeCall.startedAt || endedAt,
+        endedAt,
+        durationMinutes,
+        joinedParticipants: activeCall.joinedParticipants || [activeCall.pseudo]
     });
     resetActiveCallState();
 }
 
 // ── Header buttons ─────────────────────────────────────────────
 $('newChatBtn').addEventListener('click', () => {
-    $('sidebarSearch').focus();
+    openContactsModal();
 });
 $('chatCallBtn').addEventListener('click', () => {
     startCall('audio');
@@ -1922,23 +2034,22 @@ $('memberSearchInput').addEventListener('input', (e) => {
     clearTimeout(memberSearchDebounce);
     if (!q) { $('memberSearchDropdown').style.display = 'none'; return; }
     memberSearchDebounce = setTimeout(() => {
-        socket.emit('search-users', q, (results) => {
-            const dd = $('memberSearchDropdown');
-            dd.innerHTML = '';
-            if (!results.length) { dd.style.display = 'none'; return; }
-            dd.style.display = 'block';
-            results.filter(u => !selectedMembers.find(m => m.pseudo === u.pseudo)).forEach(u => {
-                const div = document.createElement('div');
-                div.className = 'msd-item';
-                div.innerHTML = `<img src="${u.avatar}" alt=""><span>${escHtml(u.pseudo)}</span>`;
-                div.addEventListener('click', () => {
-                    selectedMembers.push(u);
-                    $('memberSearchInput').value = '';
-                    dd.style.display = 'none';
-                    renderSelectedMembers();
-                });
-                dd.appendChild(div);
+        const results = filteredRegisteredContacts(q);
+        const dd = $('memberSearchDropdown');
+        dd.innerHTML = '';
+        if (!results.length) { dd.style.display = 'none'; return; }
+        dd.style.display = 'block';
+        results.filter(u => !selectedMembers.find(m => m.pseudo === u.pseudo)).forEach(u => {
+            const div = document.createElement('div');
+            div.className = 'msd-item';
+            div.innerHTML = `<img src="${u.avatar}" alt=""><span>${escHtml(u.contactName || u.pseudo)}</span>`;
+            div.addEventListener('click', () => {
+                selectedMembers.push(u);
+                $('memberSearchInput').value = '';
+                dd.style.display = 'none';
+                renderSelectedMembers();
             });
+            dd.appendChild(div);
         });
     }, 250);
 });
@@ -2051,23 +2162,23 @@ $('profileBtn').addEventListener('click', openProfileModal);
 
 function renderContactsList() {
     const list = $('contactsList');
-    const contacts = currentUser?.contacts || [];
+    const contacts = getRegisteredContacts();
     list.innerHTML = '';
 
     if (!contacts.length) {
-        list.innerHTML = '<div class="empty-state" style="height:auto;padding:12px"><small>Aucun contact enregistré pour les statuts.</small></div>';
+        list.innerHTML = '<div class="empty-state" style="height:auto;padding:12px"><small>Aucun contact enregistré trouvé dans votre répertoire.</small></div>';
         return;
     }
 
-    contacts.forEach(phone => {
+    contacts.forEach(contact => {
         const item = document.createElement('div');
         item.className = 'contact-item';
         item.innerHTML = `
             <div>
-                <strong>${escHtml(formatPhoneNumber(phone))}</strong>
-                <div class="status-meta-sub">Contact autorisé pour les statuts</div>
+                <strong>${escHtml(contact.contactName || contact.pseudo)}</strong>
+                <div class="status-meta-sub">${escHtml(contact.phoneNumber || '')}</div>
             </div>
-            <button class="btn-secondary" onclick="removeContact('${phone}')">Retirer</button>
+            <button class="btn-secondary" onclick="removeContact('${contact.phoneNumber}')">Retirer</button>
         `;
         list.appendChild(item);
     });
@@ -2084,9 +2195,61 @@ function removeContact(phone) {
 }
 window.removeContact = removeContact;
 
+function renderContactsDirectory(query = '') {
+    const list = $('contactsDirectoryList');
+    if (!list) return;
+    const contacts = filteredRegisteredContacts(query);
+    list.innerHTML = '';
+    if (!contacts.length) {
+        list.innerHTML = '<div class="empty-state" style="height:auto;padding:12px"><small>Aucun contact enregistré correspondant.</small></div>';
+        return;
+    }
+    contacts.forEach(contact => {
+        const item = document.createElement('div');
+        item.className = 'contact-item';
+        item.innerHTML = `
+            <div>
+                <strong>${escHtml(contact.contactName || contact.pseudo)}</strong>
+                <div class="status-meta-sub">${escHtml(contact.phoneNumber || '')}</div>
+                <div class="status-meta-sub">${contact.presenceHidden ? 'Présence masquée' : (contact.online ? 'En ligne' : lastSeenText(contact.lastSeen))}</div>
+            </div>
+            <button class="btn-primary">Ouvrir</button>
+        `;
+        item.querySelector('button').addEventListener('click', () => {
+            closeModal('contactsModal');
+            openChat({ type: 'private', id: contact.pseudo, name: contact.contactName || contact.pseudo, avatar: contact.avatar || dicebear(contact.contactName || contact.pseudo) });
+        });
+        list.appendChild(item);
+    });
+}
+
+function openContactsModal() {
+    $('contactsDirectorySearch').value = '';
+    renderContactsDirectory();
+    openModal('contactsModal');
+}
+
+function syncContacts(entries, replaceAll = false, successMessage = 'Répertoire synchronisé') {
+    if (!entries.length) {
+        showToast('Aucun contact valide à synchroniser');
+        return;
+    }
+    socket.emit('sync-contacts', { contacts: entries, replaceAll }, (res) => {
+        if (!res?.success) return showToast(res?.error || 'Erreur');
+        syncCurrentUser(res.user);
+        renderContactsList();
+        renderActusFriends();
+        renderStatusStrip();
+        renderContactsDirectory($('contactsDirectorySearch')?.value || '');
+        showToast(`${successMessage} (${res.matchedCount || 0} comptes trouvés)`);
+    });
+}
+
 function openProfileModal() {
     $('profileAvatar').src = currentUser.avatar;
     $('profilePseudo').textContent = currentUser.pseudo;
+    $('profileHeroEmail').textContent = currentUser.email || 'Email non renseigné';
+    $('profileHeroPhone').textContent = currentUser.phoneNumber || 'Numéro non renseigné';
     $('profileEmail').value = currentUser.email || '';
     $('profileEmailHint').textContent = currentUser.emailVerified ? 'Email vérifié pour récupération OTP.' : 'Ajoutez un email valide pour la récupération de compte.';
     $('profileBio').value = currentUser.bio || '';
@@ -2095,8 +2258,11 @@ function openProfileModal() {
     $('profilePhoneHint').textContent = currentUser.phoneNumber
         ? `Numero actuel: ${formatPhoneNumber(currentUser.phoneNumber)}`
         : 'Ajoutez votre numero pour activer les statuts prives.';
-    $('contactCountryCode').value = '+242';
-    $('contactPhoneNumber').value = '';
+    $('privacyProfilePhoto').value = currentUser.privacy?.profilePhoto || 'everyone';
+    $('privacyPresence').value = currentUser.privacy?.presence || 'contacts';
+    $('privacyPhone').value = currentUser.privacy?.phone || 'contacts';
+    $('privacyStatus').value = currentUser.privacy?.status || 'mutual-contacts';
+    $('manualContactsInput').value = '';
     $('profileAdminBadge').style.display = currentUser.isAdmin ? 'inline-flex' : 'none';
     $('profileStatsGrid').style.display = currentUser.isAdmin ? 'grid' : 'none';
     $('profileStatsNotice').style.display = currentUser.isAdmin ? 'none' : 'block';
@@ -2129,29 +2295,41 @@ $('saveProfileBtn').addEventListener('click', () => {
         bio: $('profileBio').value,
         email,
         countryCode: $('profileCountryCode').value,
-        phoneNumber: $('profilePhoneNumber').value.trim()
+        phoneNumber: $('profilePhoneNumber').value.trim(),
+        privacy: {
+            profilePhoto: $('privacyProfilePhoto').value,
+            presence: $('privacyPresence').value,
+            phone: $('privacyPhone').value,
+            status: $('privacyStatus').value
+        }
     }, (res) => {
         if (res.success) {
-            currentUser = res.user;
-            updateSidebarUser();
+            syncCurrentUser(res.user);
             closeModal('profileModal');
             showToast('Profil mis à jour ✓');
         } else showToast(res?.error || 'Erreur');
     });
 });
-
-$('addContactBtn').addEventListener('click', () => {
-    socket.emit('add-contact', {
-        countryCode: $('contactCountryCode').value,
-        phoneNumber: $('contactPhoneNumber').value.trim()
-    }, (res) => {
-        if (!res?.success) return showToast(res?.error || 'Erreur');
-        syncCurrentUser(res.user);
-        $('contactPhoneNumber').value = '';
-        renderContactsList();
-        renderStatusStrip();
-        showToast('Contact ajouté');
-    });
+$('openContactsDirectoryBtn').addEventListener('click', openContactsModal);
+$('contactsDirectorySearch').addEventListener('input', (e) => renderContactsDirectory(e.target.value));
+$('syncManualContactsBtn').addEventListener('click', () => {
+    syncContacts(parseManualContactsInput($('manualContactsInput').value), false, 'Répertoire mis à jour');
+});
+$('importDeviceContactsBtn').addEventListener('click', async () => {
+    if (!navigator.contacts?.select) {
+        showToast('Import direct indisponible ici. Utilisez le champ de répertoire ci-dessous.');
+        return;
+    }
+    try {
+        const picked = await navigator.contacts.select(['name', 'tel'], { multiple: true });
+        const entries = (picked || []).flatMap(contact => (contact.tel || []).map(phoneNumber => ({
+            label: Array.isArray(contact.name) ? contact.name[0] : (contact.name || ''),
+            phoneNumber
+        })));
+        syncContacts(entries, false, 'Contacts importés');
+    } catch (err) {
+        showToast('Import des contacts annulé');
+    }
 });
 
 $('enableNotificationsBtn').addEventListener('click', async () => {
@@ -2340,7 +2518,7 @@ function renderMyStatuses() {
             }
             <div style="flex:1">
                 <div>${escHtml(status.text || 'Statut média')}</div>
-                <div class="status-meta-sub">${formatTime(status.createdAt)} · ${status.viewedByCount || 0} vues · Contacts mutuels</div>
+                <div class="status-meta-sub">${formatTime(status.createdAt)} · ${status.viewedByCount || 0} vues · ${escHtml(currentUser?.privacy?.status || 'mutual-contacts')}</div>
             </div>
             <button onclick="deleteStatus('${status.id}')"><i class="fas fa-trash"></i></button>
         `;
@@ -2352,6 +2530,7 @@ function openStatusComposerModal() {
     $('statusTextInput').value = '';
     statusUpload = null;
     selectedStatusTheme = STATUS_THEMES[0].key;
+    $('statusAudienceHint').textContent = `Visible: ${currentUser?.privacy?.status || 'mutual-contacts'}`;
     renderStatusThemePicker();
     updateStatusComposerPreview();
     renderMyStatuses();
@@ -2372,12 +2551,15 @@ function renderActiveStatus() {
     if (!activeStatusGroup.length) return closeModal('statusViewerModal');
     const status = activeStatusGroup[activeStatusIndex];
     if (!status) return;
+    const contact = getRegisteredContacts().find(entry => entry.pseudo === status.userPseudo);
+    $('statusProgressBars').innerHTML = activeStatusGroup.map((item, index) => `<span class="${index <= activeStatusIndex ? 'seen' : ''}"></span>`).join('');
 
-    $('statusViewerTitle').innerHTML = `<i class="fas fa-circle-notch"></i> ${escHtml(status.userPseudo)}`;
+    $('statusViewerTitle').innerHTML = `<i class="fas fa-circle-notch"></i> ${escHtml(contact?.contactName || status.userPseudo)}`;
     $('statusViewerMeta').innerHTML = `
-        <div class="status-meta-title">${escHtml(status.userPseudo)}</div>
+        <div class="status-meta-title">${escHtml(contact?.contactName || status.userPseudo)}</div>
         <div class="status-meta-sub">Publié le ${new Date(status.createdAt).toLocaleString('fr-FR', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}</div>
-        <div class="status-meta-sub">Audience: contacts mutuels</div>
+        <div class="status-meta-sub">Audience: ${escHtml(status.audience || 'contacts')}</div>
+        ${status.repostOf ? `<div class="status-meta-sub">Repartagé depuis ${escHtml(status.repostOf.userPseudo || '')}</div>` : ''}
         ${status.seenBy?.length ? `<div class="status-meta-sub">Vu par: ${status.seenBy.map(user => escHtml(user.pseudo)).join(', ')}</div>` : ''}
     `;
 
@@ -2400,6 +2582,7 @@ function renderActiveStatus() {
         content.innerHTML = `<div class="status-viewer-text">${escHtml(status.text || 'Statut')}</div>`;
     }
     if (status.mediaUrl) content.style.background = '';
+    $('likeStatusBtn').innerHTML = `${status.liked ? '<i class="fas fa-heart"></i>' : '<i class="far fa-heart"></i>'} ${status.likedByCount || 0} j'aime`;
 
     socket.emit('view-status', { statusId: status.id }, (res) => {
         if (res?.success && res.status) {
@@ -2410,6 +2593,28 @@ function renderActiveStatus() {
         }
     });
 }
+
+$('likeStatusBtn').addEventListener('click', () => {
+    const status = activeStatusGroup[activeStatusIndex];
+    if (!status) return;
+    socket.emit('toggle-status-like', { statusId: status.id }, (res) => {
+        if (!res?.success) return showToast(res?.error || 'Erreur');
+        upsertStatus(res.status);
+        activeStatusGroup[activeStatusIndex] = res.status;
+        renderActiveStatus();
+    });
+});
+
+$('repostStatusBtn').addEventListener('click', () => {
+    const status = activeStatusGroup[activeStatusIndex];
+    if (!status) return;
+    socket.emit('repost-status', { statusId: status.id }, (res) => {
+        if (!res?.success) return showToast(res?.error || 'Erreur');
+        upsertStatus(res.status);
+        renderMyStatuses();
+        showToast('Statut repartagé');
+    });
+});
 
 function deleteStatus(statusId) {
     if (!confirm('Supprimer ce statut ?')) return;
@@ -2619,7 +2824,7 @@ function setupSocketListeners() {
         renderConversations();
         if (currentChat?.type === 'private') {
             const u = users.find(u => u.pseudo === currentChat.id);
-            $('currentChatStatus').textContent = u?.online ? 'En ligne' : lastSeenText(u?.lastSeen);
+            $('currentChatStatus').textContent = u?.presenceHidden ? 'Présence masquée' : (u?.online ? 'En ligne' : lastSeenText(u?.lastSeen));
             $('chatOnlineDot').classList.toggle('show', !!u?.online);
         }
     });
@@ -2687,7 +2892,8 @@ function setupSocketListeners() {
             name: user?.pseudo || from,
             avatar: avatar || user?.avatar || dicebear(from),
             mode: mode === 'video' ? 'video' : 'audio',
-            status: `${mode === 'video' ? 'Appel vidéo' : 'Appel audio'} entrant`
+            status: `${mode === 'video' ? 'Appel vidéo' : 'Appel audio'} entrant`,
+            startedAt: new Date().toISOString()
         };
         openCallModal();
     });
@@ -2696,7 +2902,17 @@ function setupSocketListeners() {
         if (!activeCall || activeCall.pseudo !== from) return;
         if (!accepted) {
             showToast(reason || 'Appel refusé');
-            pushCallHistory({ pseudo: from, avatar: activeCall.avatar, mode: activeCall.mode, direction: 'outgoing', status: reason || 'Refusé' });
+            pushCallHistory({
+                pseudo: from,
+                avatar: activeCall.avatar,
+                mode: activeCall.mode,
+                direction: 'outgoing',
+                status: reason || 'Refusé',
+                startedAt: activeCall.startedAt || new Date().toISOString(),
+                endedAt: new Date().toISOString(),
+                durationMinutes: 0,
+                joinedParticipants: [currentUser?.pseudo].filter(Boolean)
+            });
             resetActiveCallState();
             return;
         }
@@ -2735,12 +2951,18 @@ function setupSocketListeners() {
         const relatedPending = pendingIncomingCall && pendingIncomingCall.pseudo === from;
         if (!relatedCall && !relatedPending) return;
         if (activeCall) {
+            const endedAt = new Date().toISOString();
+            const durationMinutes = activeCall.connectedAt ? Math.max(1, Math.round((new Date(endedAt) - new Date(activeCall.connectedAt)) / 60000)) : 0;
             pushCallHistory({
                 pseudo: activeCall.pseudo,
                 avatar: activeCall.avatar,
                 mode: activeCall.mode,
                 direction: activeCall.direction,
-                status: reason || 'Terminé'
+                status: reason || 'Terminé',
+                startedAt: activeCall.startedAt || endedAt,
+                endedAt,
+                durationMinutes,
+                joinedParticipants: activeCall.joinedParticipants || [activeCall.pseudo]
             });
         }
         showToast(reason || 'Appel terminé');
@@ -3008,26 +3230,25 @@ function initMobileUI() {
                 $('conversationsListMobile').style.display  = 'flex';
                 return;
             }
-            socket.emit('search-users', q, (results) => {
-                $('mobileSearchResultsPanel').style.display  = 'block';
-                $('conversationsListMobile').style.display   = 'none';
-                const list = $('mobileSearchResultsList');
-                list.innerHTML = '';
-                if (!results?.length) { list.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-gray)">Aucun résultat</div>'; return; }
-                results.forEach(u => {
-                    const d = document.createElement('div');
-                    d.className = 'search-result-item';
-                    d.innerHTML = `<img src="${u.avatar||dicebear(u.pseudo)}" alt=""><div><div class="sr-name">${escHtml(u.pseudo)}</div><div class="sr-sub">${escHtml(maskPhoneNumber(u.maskedPhoneNumber || ''))}</div><div class="sr-sub">${u.online?'En ligne':lastSeenText(u.lastSeen)}</div></div>`;
-                    d.addEventListener('click', () => {
-                        searchBar.style.display = 'none';
-                        $('appTopbar').style.display = 'flex';
-                        searchInp.value = '';
-                        $('mobileSearchResultsPanel').style.display = 'none';
-                        $('conversationsListMobile').style.display  = 'flex';
-                        openChat({ type:'private', id:u.pseudo, name:u.pseudo, avatar:u.avatar||dicebear(u.pseudo) });
-                    });
-                    list.appendChild(d);
+            const results = filteredRegisteredContacts(q);
+            $('mobileSearchResultsPanel').style.display  = 'block';
+            $('conversationsListMobile').style.display   = 'none';
+            const list = $('mobileSearchResultsList');
+            list.innerHTML = '';
+            if (!results?.length) { list.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-gray)">Aucun contact enregistré</div>'; return; }
+            results.forEach(u => {
+                const d = document.createElement('div');
+                d.className = 'search-result-item';
+                d.innerHTML = `<img src="${u.avatar||dicebear(u.contactName||u.pseudo)}" alt=""><div><div class="sr-name">${escHtml(u.contactName || u.pseudo)}</div><div class="sr-sub">${escHtml(u.phoneNumber || '')}</div><div class="sr-sub">${u.presenceHidden ? 'Présence masquée' : (u.online?'En ligne':lastSeenText(u.lastSeen))}</div></div>`;
+                d.addEventListener('click', () => {
+                    searchBar.style.display = 'none';
+                    $('appTopbar').style.display = 'flex';
+                    searchInp.value = '';
+                    $('mobileSearchResultsPanel').style.display = 'none';
+                    $('conversationsListMobile').style.display  = 'flex';
+                    openChat({ type:'private', id:u.pseudo, name:u.contactName || u.pseudo, avatar:u.avatar||dicebear(u.contactName||u.pseudo) });
                 });
+                list.appendChild(d);
             });
         });
     }
@@ -3037,11 +3258,11 @@ function initMobileUI() {
     const moreMenu= $('topbarCtxMenu');
     if (moreBtn) moreBtn.addEventListener('click', e => { e.stopPropagation(); moreMenu.classList.toggle('open'); });
 
-    // FAB new chat → focus search
+    // FAB new chat → contacts modal
     const fab = $('fabNewChat');
     if (fab) fab.addEventListener('click', () => {
         switchTab('pageDiscussions', document.querySelector('[data-tab="pageDiscussions"]'));
-        if (searchBtn) searchBtn.click();
+        openContactsModal();
     });
 
     // FAB status
@@ -3065,10 +3286,13 @@ function initMobileUI() {
     const logoutMobile = $('logoutBtnMobile');
     if (logoutMobile) logoutMobile.addEventListener('click', () => {
         if (confirm('Se déconnecter ?')) {
+            const token = authSessionToken;
             authSessionToken = null;
             clearSessionAuth();
-            socket.disconnect();
-            location.reload();
+            socket.emit('logout', { sessionToken: token }, () => {
+                socket.disconnect();
+                location.reload();
+            });
         }
     });
 
@@ -3103,7 +3327,7 @@ function initMobileUI() {
 
     // Settings rows handlers
     const sp = $('settingsPrivacyBtn');
-    if (sp) sp.addEventListener('click', () => showToast('Paramètres de confidentialité — bientôt'));
+    if (sp) sp.addEventListener('click', () => openProfileModal());
     const sn = $('settingsNotifBtn');
     if (sn) sn.addEventListener('click', () => showToast('Paramètres de notifications — bientôt'));
     const st = $('settingsThemeBtn');
@@ -3166,14 +3390,10 @@ function updateActusBadge() {
     const badge = $('tabBadgeActus');
     if (!badge || !currentUser) return;
 
-    const myContacts = currentUser.contacts || [];
     const unseenContacts = new Set();
     statuses.forEach(status => {
         if (status.userPseudo === currentUser.pseudo) return;
-        const userPhone = allUsers.find(u => u.pseudo === status.userPseudo)?.phoneNumber;
-        const isVisible = myContacts.includes(userPhone) || myContacts.includes(status.userPseudo);
-        if (!isVisible) return;
-        if (!status.viewedBy?.includes(currentUser.pseudo)) unseenContacts.add(status.userPseudo);
+        if (!status.viewed) unseenContacts.add(status.userPseudo);
     });
 
     badge.textContent = unseenContacts.size > 99 ? '99+' : String(unseenContacts.size);
@@ -3184,16 +3404,10 @@ function renderActusFriends() {
     const list = $('actusFriendsList');
     if (!list) return;
 
-    // Get statuses of contacts
-    const myContacts = currentUser?.contacts || [];
     const friendStatuses = new Map();
 
     statuses.forEach(s => {
-        if (s.userPseudo === currentUser?.pseudo) return; // skip own
-        // Only show if contact
-        const userPhone = allUsers.find(u => u.pseudo === s.userPseudo)?.phoneNumber;
-        const isMutual  = myContacts.includes(userPhone) || myContacts.includes(s.userPseudo);
-        if (!isMutual) return;
+        if (s.userPseudo === currentUser?.pseudo) return;
         if (!friendStatuses.has(s.userPseudo)) friendStatuses.set(s.userPseudo, []);
         friendStatuses.get(s.userPseudo).push(s);
     });
@@ -3205,16 +3419,17 @@ function renderActusFriends() {
     list.innerHTML = '';
     friendStatuses.forEach((sts, pseudo) => {
         const user = allUsers.find(u => u.pseudo === pseudo);
-        const allSeen = sts.every(s => s.viewedBy?.includes(currentUser.pseudo));
+        const contact = getRegisteredContacts().find(entry => entry.pseudo === pseudo);
+        const allSeen = sts.every(s => s.viewed);
         const latest  = sts[0];
         const div = document.createElement('div');
         div.className = 'actus-friend-item';
         div.innerHTML = `
             <div class="actus-friend-ring ${allSeen?'seen':'unseen'}">
-                <img src="${user?.avatar||dicebear(pseudo)}" alt="">
+                <img src="${user?.avatar||contact?.avatar||dicebear(pseudo)}" alt="">
             </div>
             <div class="actus-friend-info">
-                <div class="actus-friend-name">${escHtml(pseudo)}</div>
+                <div class="actus-friend-name">${escHtml(contact?.contactName || pseudo)}</div>
                 <div class="actus-friend-time">${timeAgo(latest.createdAt)} · ${sts.length} statut${sts.length>1?'s':''}</div>
             </div>
         `;

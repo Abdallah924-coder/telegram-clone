@@ -51,14 +51,20 @@ const UPLOADS_DIR = process.env.UPLOADS_DIR || (DEFAULT_STORAGE_ROOT ? path.join
 const AVATARS_DIR = process.env.AVATARS_DIR || (DEFAULT_STORAGE_ROOT ? path.join(DEFAULT_STORAGE_ROOT, 'avatars') : LOCAL_AVATARS_DIR);
 const STATUS_TTL_MS = 24 * 60 * 60 * 1000;
 const UPDATE_CHANNEL_KEY = 'system:updates';
-const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const SESSION_TTL_MS = 365 * 24 * 60 * 60 * 1000;
 const OTP_TTL_MS = 10 * 60 * 1000;
 const OTP_RESEND_COOLDOWN_MS = 45 * 1000;
+const USER_CALL_HISTORY_LIMIT = 25;
 const MONGODB_URI = String(process.env.MONGODB_URI || '').trim();
 const MONGODB_DB_NAME = String(process.env.MONGODB_DB_NAME || 'devchat').trim();
 const MONGODB_COLLECTION = String(process.env.MONGODB_COLLECTION || 'app_state').trim();
 const APP_STATE_DOC_ID = 'main';
 const ALLOW_INSECURE_PASSWORD_RESET = process.env.ALLOW_INSECURE_PASSWORD_RESET === 'true';
+const BREVO_API_KEY = String(process.env.BREVO_API_KEY || '').trim();
+const BREVO_SENDER_EMAIL = String(process.env.BREVO_SENDER_EMAIL || '').trim();
+const BREVO_SENDER_NAME = String(process.env.BREVO_SENDER_NAME || 'DevChat').trim();
+const BREVO_REPLY_TO_EMAIL = String(process.env.BREVO_REPLY_TO_EMAIL || '').trim();
+const BREVO_REPLY_TO_NAME = String(process.env.BREVO_REPLY_TO_NAME || BREVO_SENDER_NAME).trim();
 const ALLOWED_UPLOAD_MIME_PREFIXES = ['image/', 'video/', 'audio/'];
 const ALLOWED_UPLOAD_MIME_TYPES = new Set([
     'application/pdf',
@@ -109,13 +115,28 @@ function normalizeStandalonePhone(value) {
 }
 
 function defaultData() {
-    return { users: [], messages: [], groups: [], statuses: [] };
+    return { users: [], messages: [], groups: [], statuses: [], sessions: [] };
+}
+
+function copyMissingFiles(sourceDir, targetDir) {
+    if (!sourceDir || !targetDir || sourceDir === targetDir) return;
+    if (!fs.existsSync(sourceDir)) return;
+    fs.mkdirSync(targetDir, { recursive: true });
+
+    for (const entry of fs.readdirSync(sourceDir, { withFileTypes: true })) {
+        if (!entry.isFile()) continue;
+        const sourcePath = path.join(sourceDir, entry.name);
+        const targetPath = path.join(targetDir, entry.name);
+        if (!fs.existsSync(targetPath)) fs.copyFileSync(sourcePath, targetPath);
+    }
 }
 
 function ensureStorageBootstrap() {
     fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
     fs.mkdirSync(UPLOADS_DIR, { recursive: true });
     fs.mkdirSync(AVATARS_DIR, { recursive: true });
+    copyMissingFiles(LOCAL_UPLOADS_DIR, UPLOADS_DIR);
+    copyMissingFiles(LOCAL_AVATARS_DIR, AVATARS_DIR);
 
     if (fs.existsSync(DATA_FILE)) return;
 
@@ -140,6 +161,19 @@ let statuses = [];
 let socketUsers = {};
 let authSessions = new Map();
 
+function defaultPrivacySettings() {
+    return {
+        profilePhoto: 'everyone',
+        presence: 'contacts',
+        phone: 'contacts',
+        status: 'mutual-contacts'
+    };
+}
+
+function normalizePrivacyValue(value, allowedValues, fallback) {
+    return allowedValues.includes(value) ? value : fallback;
+}
+
 function ensureUserDefaults(user) {
     user.bio = user.bio || '';
     user.online = !!user.online;
@@ -154,9 +188,18 @@ function ensureUserDefaults(user) {
         user.phoneLocalNumber = normalizePhoneLocal(user.phoneNumber.slice(user.phoneCountryCode.length));
     }
     user.contacts = [...new Set((Array.isArray(user.contacts) ? user.contacts : []).map(contact => normalizeStandalonePhone(contact)).filter(Boolean))];
+    user.contactNames = user.contactNames && typeof user.contactNames === 'object' ? user.contactNames : {};
     user.isAdmin = !!user.isAdmin;
     user.email = normalizeEmail(user.email || '');
     user.emailVerified = !!user.emailVerified;
+    user.callHistory = Array.isArray(user.callHistory) ? user.callHistory.slice(0, USER_CALL_HISTORY_LIMIT) : [];
+    const privacy = user.privacy && typeof user.privacy === 'object' ? user.privacy : {};
+    user.privacy = {
+        profilePhoto: normalizePrivacyValue(privacy.profilePhoto, ['everyone', 'contacts', 'nobody'], defaultPrivacySettings().profilePhoto),
+        presence: normalizePrivacyValue(privacy.presence, ['everyone', 'contacts', 'nobody'], defaultPrivacySettings().presence),
+        phone: normalizePrivacyValue(privacy.phone, ['everyone', 'contacts', 'nobody'], defaultPrivacySettings().phone),
+        status: normalizePrivacyValue(privacy.status, ['everyone', 'contacts', 'mutual-contacts', 'nobody'], defaultPrivacySettings().status)
+    };
     return user;
 }
 
@@ -192,10 +235,31 @@ function areMutualContacts(userPseudoA, userPseudoB) {
     return userA.contacts.includes(phoneB) && userB.contacts.includes(phoneA);
 }
 
+function isViewerInOwnerContacts(ownerPseudo, viewerPseudo) {
+    const owner = persistentUsers[ownerPseudo];
+    const viewer = persistentUsers[viewerPseudo];
+    const viewerPhone = getUserPhone(viewer);
+    if (!owner || !viewerPhone) return false;
+    return owner.contacts.includes(viewerPhone);
+}
+
+function privacyAllowsUser(ownerPseudo, viewerPseudo, setting) {
+    if (!ownerPseudo || !setting) return false;
+    if (ownerPseudo === viewerPseudo) return true;
+    const owner = persistentUsers[ownerPseudo];
+    if (!owner) return false;
+    if (owner.blockedUsers?.includes(viewerPseudo)) return false;
+    if (setting === 'everyone') return true;
+    if (setting === 'contacts') return isViewerInOwnerContacts(ownerPseudo, viewerPseudo);
+    if (setting === 'mutual-contacts') return areMutualContacts(ownerPseudo, viewerPseudo);
+    return false;
+}
+
 function canViewerSeeStatus(ownerPseudo, viewerPseudo) {
     if (!ownerPseudo || !viewerPseudo) return false;
-    if (ownerPseudo === viewerPseudo) return true;
-    return areMutualContacts(ownerPseudo, viewerPseudo);
+    const owner = persistentUsers[ownerPseudo];
+    if (!owner) return false;
+    return privacyAllowsUser(ownerPseudo, viewerPseudo, owner.privacy?.status || defaultPrivacySettings().status);
 }
 
 function getUpdatesChannel() {
@@ -223,7 +287,12 @@ function currentDataSnapshot() {
         users: Object.values(persistentUsers).map(ensureUserDefaults),
         messages,
         groups: groups.map(ensureGroupDefaults),
-        statuses
+        statuses,
+        sessions: [...authSessions.entries()].map(([token, session]) => ({
+            token,
+            pseudo: session?.pseudo || '',
+            expiresAt: Number(session?.expiresAt || 0)
+        })).filter(session => session.token && session.pseudo && session.expiresAt > Date.now())
     };
 }
 
@@ -299,6 +368,7 @@ function issueSessionToken(pseudo) {
         pseudo,
         expiresAt: Date.now() + SESSION_TTL_MS
     });
+    saveData();
     return token;
 }
 
@@ -310,17 +380,34 @@ function getSessionFromToken(rawToken, shouldExtend = true) {
     if (!session) return null;
     if (session.expiresAt <= Date.now()) {
         authSessions.delete(token);
+        saveData();
         return null;
     }
-    if (shouldExtend) session.expiresAt = Date.now() + SESSION_TTL_MS;
+    if (shouldExtend) {
+        session.expiresAt = Date.now() + SESSION_TTL_MS;
+        saveData();
+    }
     return session;
 }
 
 function cleanupExpiredSessions() {
     const now = Date.now();
+    let changed = false;
     for (const [token, session] of authSessions.entries()) {
-        if (!session || session.expiresAt <= now) authSessions.delete(token);
+        if (!session || session.expiresAt <= now) {
+            authSessions.delete(token);
+            changed = true;
+        }
     }
+    if (changed) saveData();
+}
+
+function revokeSessionToken(rawToken) {
+    const token = String(rawToken || '').trim();
+    if (!token) return false;
+    const existed = authSessions.delete(token);
+    if (existed) saveData();
+    return existed;
 }
 
 function getSessionPseudoFromRequest(req) {
@@ -443,20 +530,27 @@ function cleanupExpiredStatuses(notify = false) {
     if (notify) broadcastStatuses();
 }
 
-function safeUser(user) {
+function safeUser(user, viewerPseudo = null) {
+    const avatarVisible = privacyAllowsUser(user.pseudo, viewerPseudo, user.privacy?.profilePhoto || defaultPrivacySettings().profilePhoto);
+    const presenceVisible = privacyAllowsUser(user.pseudo, viewerPseudo, user.privacy?.presence || defaultPrivacySettings().presence);
+    const phoneVisible = privacyAllowsUser(user.pseudo, viewerPseudo, user.privacy?.phone || defaultPrivacySettings().phone);
     return {
         pseudo: user.pseudo,
-        avatar: user.avatar,
+        avatar: avatarVisible ? user.avatar : '/icons/icon-128.png',
         bio: user.bio || '',
-        online: user.online || false,
-        lastSeen: user.lastSeen,
-        createdAt: user.createdAt
+        online: presenceVisible ? (user.online || false) : false,
+        lastSeen: presenceVisible ? user.lastSeen : null,
+        createdAt: user.createdAt,
+        phoneNumber: phoneVisible ? getUserPhone(user) : '',
+        avatarHidden: !avatarVisible,
+        presenceHidden: !presenceVisible,
+        phoneHidden: !phoneVisible
     };
 }
 
 function selfUserPayload(user) {
     return {
-        ...safeUser(user),
+        ...safeUser(user, user.pseudo),
         email: user.email || '',
         emailVerified: !!user.emailVerified,
         phoneCountryCode: user.phoneCountryCode || '',
@@ -467,8 +561,30 @@ function selfUserPayload(user) {
         needsPhoneSetup: !getUserPhone(user),
         blockedUsers: user.blockedUsers || [],
         hiddenChats: user.hiddenChats || {},
-        ephemeralSettings: user.ephemeralSettings || {}
+        ephemeralSettings: user.ephemeralSettings || {},
+        callHistory: user.callHistory || [],
+        privacy: user.privacy || defaultPrivacySettings(),
+        contactNames: user.contactNames || {},
+        contactUsers: contactDirectoryForUser(user.pseudo)
     };
+}
+
+function contactDirectoryForUser(userPseudo) {
+    const owner = persistentUsers[userPseudo];
+    if (!owner) return [];
+    ensureUserDefaults(owner);
+    return owner.contacts
+        .map(phoneNumber => {
+            const matchedUser = findUserByPhone(phoneNumber);
+            if (!matchedUser || matchedUser.pseudo === userPseudo) return null;
+            return {
+                ...safeUser(matchedUser, userPseudo),
+                phoneNumber,
+                contactName: String(owner.contactNames?.[phoneNumber] || '').trim() || matchedUser.pseudo,
+                isRegistered: true
+            };
+        })
+        .filter(Boolean);
 }
 
 function otpKey(purpose, email) {
@@ -504,7 +620,7 @@ function issueOtpForEmail(purpose, email, payload = {}) {
         attempts: 0
     });
     console.log(`[OTP ${purpose}] ${normalizedEmail}: ${otp}`);
-    return otp;
+    return { otp, key };
 }
 
 function verifyOtpForEmail(purpose, email, otp) {
@@ -534,15 +650,130 @@ function safeStatus(status, viewerPseudo) {
         background: status.background || null,
         createdAt: status.createdAt,
         expiresAt: status.expiresAt,
-        audience: 'mutual-contacts',
+        audience: persistentUsers[status.userPseudo]?.privacy?.status || 'mutual-contacts',
         viewed: !!viewerPseudo && status.viewedBy?.includes(viewerPseudo),
+        liked: !!viewerPseudo && status.likedBy?.includes(viewerPseudo),
+        likedByCount: Array.isArray(status.likedBy) ? status.likedBy.length : 0,
         viewedByCount: viewers.length,
-        seenBy: viewerPseudo === status.userPseudo ? viewers.map(pseudo => safeUser(persistentUsers[pseudo])).filter(Boolean) : []
+        repostOf: status.repostOf || null,
+        seenBy: viewerPseudo === status.userPseudo
+            ? viewers.map(pseudo => persistentUsers[pseudo] ? safeUser(persistentUsers[pseudo], viewerPseudo) : null).filter(Boolean)
+            : []
+    };
+}
+
+function brevoConfigured() {
+    return !!(BREVO_API_KEY && BREVO_SENDER_EMAIL);
+}
+
+async function sendBrevoEmail({ toEmail, toName, subject, htmlContent, textContent }) {
+    if (!brevoConfigured()) {
+        throw new Error('Configuration email manquante: BREVO_API_KEY et BREVO_SENDER_EMAIL requis');
+    }
+
+    const payload = {
+        sender: {
+            email: BREVO_SENDER_EMAIL,
+            name: BREVO_SENDER_NAME || 'DevChat'
+        },
+        to: [{ email: toEmail, name: toName || toEmail }],
+        subject,
+        htmlContent,
+        textContent
+    };
+
+    if (BREVO_REPLY_TO_EMAIL) {
+        payload.replyTo = {
+            email: BREVO_REPLY_TO_EMAIL,
+            name: BREVO_REPLY_TO_NAME || BREVO_SENDER_NAME || 'DevChat'
+        };
+    }
+
+    const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+        method: 'POST',
+        headers: {
+            'accept': 'application/json',
+            'content-type': 'application/json',
+            'api-key': BREVO_API_KEY
+        },
+        body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) {
+        const raw = await response.text().catch(() => '');
+        let message = `Brevo HTTP ${response.status}`;
+        if (raw) {
+            try {
+                const parsed = JSON.parse(raw);
+                message = parsed?.message || parsed?.code || message;
+            } catch (err) {
+                message = raw.slice(0, 200) || message;
+            }
+        }
+        throw new Error(message);
+    }
+
+    return response.json().catch(() => ({}));
+}
+
+async function sendOtpEmail({ purpose, email, otp, pseudo }) {
+    const appName = 'DevChat';
+    const actionLabel = purpose === 'reset' ? 'réinitialisation du mot de passe' : 'validation de votre inscription';
+    const subject = purpose === 'reset' ? 'Votre code OTP DevChat' : 'Confirmez votre inscription DevChat';
+    const safePseudo = String(pseudo || '').trim() || email;
+    const htmlContent = `
+        <div style="font-family:Arial,sans-serif;line-height:1.5;color:#1f2937">
+            <h2 style="margin:0 0 12px">${appName}</h2>
+            <p>Bonjour ${safePseudo},</p>
+            <p>Utilisez ce code pour finaliser la ${actionLabel} :</p>
+            <p style="font-size:28px;font-weight:700;letter-spacing:4px;margin:20px 0">${otp}</p>
+            <p>Ce code expire dans 10 minutes.</p>
+            <p>Si vous n'êtes pas à l'origine de cette demande, ignorez cet email.</p>
+        </div>
+    `.trim();
+    const textContent = [
+        `${appName}`,
+        `Bonjour ${safePseudo},`,
+        `Utilisez ce code pour finaliser la ${actionLabel} : ${otp}`,
+        'Ce code expire dans 10 minutes.',
+        "Si vous n'êtes pas à l'origine de cette demande, ignorez cet email."
+    ].join('\n');
+
+    return sendBrevoEmail({
+        toEmail: email,
+        toName: safePseudo,
+        subject,
+        htmlContent,
+        textContent
+    });
+}
+
+function sanitizeCallHistoryEntry(entry) {
+    if (!entry || typeof entry !== 'object') return null;
+    const pseudo = String(entry.pseudo || '').trim();
+    if (!pseudo) return null;
+    return {
+        pseudo: pseudo.slice(0, 80),
+        avatar: String(entry.avatar || '').trim().slice(0, 300),
+        mode: entry.mode === 'video' ? 'video' : 'audio',
+        direction: entry.direction === 'incoming' ? 'incoming' : 'outgoing',
+        status: String(entry.status || 'Terminé').trim().slice(0, 80) || 'Terminé',
+        date: new Date(entry.date || Date.now()).toISOString(),
+        startedAt: new Date(entry.startedAt || entry.date || Date.now()).toISOString(),
+        endedAt: new Date(entry.endedAt || entry.date || Date.now()).toISOString(),
+        durationMinutes: Math.max(0, Number(entry.durationMinutes || 0)),
+        joinedParticipants: Array.isArray(entry.joinedParticipants)
+            ? entry.joinedParticipants.map(name => String(name || '').trim()).filter(Boolean).slice(0, 20)
+            : []
     };
 }
 
 function _getSocketId(pseudo) {
     return Object.keys(socketUsers).find(sid => socketUsers[sid] === pseudo);
+}
+
+function _getSocketIdsForPseudo(pseudo) {
+    return Object.keys(socketUsers).filter(sid => socketUsers[sid] === pseudo);
 }
 
 function _broadcastToMessageParticipants(msg, event, data) {
@@ -561,7 +792,9 @@ function _broadcastToMessageParticipants(msg, event, data) {
 }
 
 function broadcastUsers() {
-    io.emit('users-list', Object.values(persistentUsers).map(safeUser));
+    Object.entries(socketUsers).forEach(([sid, viewerPseudo]) => {
+        io.to(sid).emit('users-list', Object.values(persistentUsers).map(user => safeUser(user, viewerPseudo)));
+    });
 }
 
 function broadcastStatuses() {
@@ -599,7 +832,7 @@ function finalizeAuth(socket, user, callback) {
         user: selfUserPayload(user),
         messages: userMessages,
         groups: userGroups,
-        users: Object.values(persistentUsers).map(safeUser),
+        users: Object.values(persistentUsers).map(candidate => safeUser(candidate, userPseudo)),
         statuses: activeStatusesForViewer(userPseudo),
         updateChannel: safeUpdateChannel(userPseudo),
         sessionToken: issueSessionToken(userPseudo)
@@ -838,7 +1071,7 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('request-register-otp', ({ pseudo, countryCode, phoneNumber, email }, callback) => {
+    socket.on('request-register-otp', async ({ pseudo, countryCode, phoneNumber, email }, callback) => {
         const normalizedPseudo = String(pseudo || '').trim();
         const normalizedPhone = normalizePhone(countryCode, phoneNumber);
         const normalizedEmail = normalizeEmail(email);
@@ -851,9 +1084,15 @@ io.on('connection', (socket) => {
             return callback?.({ success: false, error: 'Cet email est déjà utilisé' });
         }
         try {
-            const otp = issueOtpForEmail('register', normalizedEmail, {
+            const { otp } = issueOtpForEmail('register', normalizedEmail, {
                 pseudo: normalizedPseudo,
                 phoneNumber: normalizedPhone
+            });
+            await sendOtpEmail({
+                purpose: 'register',
+                email: normalizedEmail,
+                otp,
+                pseudo: normalizedPseudo
             });
             callback?.({
                 success: true,
@@ -861,11 +1100,14 @@ io.on('connection', (socket) => {
                 ...(process.env.NODE_ENV === 'production' ? {} : { devOtp: otp })
             });
         } catch (err) {
+            if (!String(err.message || '').startsWith('Réessayez dans ')) {
+                pendingOtps.delete(otpKey('register', normalizedEmail));
+            }
             callback?.({ success: false, error: err.message });
         }
     });
 
-    socket.on('request-reset-otp', ({ pseudo, countryCode, phoneNumber, email }, callback) => {
+    socket.on('request-reset-otp', async ({ pseudo, countryCode, phoneNumber, email }, callback) => {
         const normalizedEmail = normalizeEmail(email);
         const normalizedPhone = normalizePhone(countryCode, phoneNumber);
         const userByPhone = normalizedPhone ? findUserByPhone(normalizedPhone) : null;
@@ -877,13 +1119,22 @@ io.on('connection', (socket) => {
             return callback?.({ success: false, error: 'Cet email ne correspond pas au compte' });
         }
         try {
-            const otp = issueOtpForEmail('reset', normalizedEmail, { pseudo: user.pseudo });
+            const { otp } = issueOtpForEmail('reset', normalizedEmail, { pseudo: user.pseudo });
+            await sendOtpEmail({
+                purpose: 'reset',
+                email: normalizedEmail,
+                otp,
+                pseudo: user.pseudo
+            });
             callback?.({
                 success: true,
                 message: 'Code OTP envoyé',
                 ...(process.env.NODE_ENV === 'production' ? {} : { devOtp: otp })
             });
         } catch (err) {
+            if (!String(err.message || '').startsWith('Réessayez dans ')) {
+                pendingOtps.delete(otpKey('reset', normalizedEmail));
+            }
             callback?.({ success: false, error: err.message });
         }
     });
@@ -921,7 +1172,7 @@ io.on('connection', (socket) => {
         return callback?.({ success: true });
     });
 
-    socket.on('update-profile', ({ avatar, bio, countryCode, phoneNumber, email }, callback) => {
+    socket.on('update-profile', ({ avatar, bio, countryCode, phoneNumber, email, privacy }, callback) => {
         const pseudo = socketUsers[socket.id];
         if (!pseudo) return callback?.({ success: false });
         const user = persistentUsers[pseudo];
@@ -947,9 +1198,32 @@ io.on('connection', (socket) => {
             user.phoneLocalNumber = normalizePhoneLocal(phoneNumber);
             user.phoneNumber = nextPhone;
         }
+        if (privacy && typeof privacy === 'object') {
+            user.privacy = {
+                profilePhoto: normalizePrivacyValue(privacy.profilePhoto, ['everyone', 'contacts', 'nobody'], user.privacy?.profilePhoto || defaultPrivacySettings().profilePhoto),
+                presence: normalizePrivacyValue(privacy.presence, ['everyone', 'contacts', 'nobody'], user.privacy?.presence || defaultPrivacySettings().presence),
+                phone: normalizePrivacyValue(privacy.phone, ['everyone', 'contacts', 'nobody'], user.privacy?.phone || defaultPrivacySettings().phone),
+                status: normalizePrivacyValue(privacy.status, ['everyone', 'contacts', 'mutual-contacts', 'nobody'], user.privacy?.status || defaultPrivacySettings().status)
+            };
+        }
         saveData();
         broadcastUsers();
         broadcastStatuses();
+        callback?.({ success: true, user: selfUserPayload(user) });
+    });
+
+    socket.on('save-call-history', ({ entries }, callback) => {
+        const pseudo = socketUsers[socket.id];
+        const user = persistentUsers[pseudo];
+        if (!pseudo || !user) return callback?.({ success: false, error: 'Session invalide' });
+
+        const nextEntries = (Array.isArray(entries) ? entries : [])
+            .map(sanitizeCallHistoryEntry)
+            .filter(Boolean)
+            .slice(0, USER_CALL_HISTORY_LIMIT);
+
+        user.callHistory = nextEntries;
+        saveData();
         callback?.({ success: true, user: selfUserPayload(user) });
     });
 
@@ -967,9 +1241,11 @@ io.on('connection', (socket) => {
 
         ensureUserDefaults(user);
         if (!user.contacts.includes(normalizedPhone)) user.contacts.push(normalizedPhone);
+        if (!user.contactNames[normalizedPhone]) user.contactNames[normalizedPhone] = targetUser.pseudo;
         saveData();
+        broadcastUsers();
         broadcastStatuses();
-        callback?.({ success: true, user: selfUserPayload(user), contactUser: safeUser(targetUser) });
+        callback?.({ success: true, user: selfUserPayload(user), contactUser: safeUser(targetUser, pseudo) });
     });
 
     socket.on('remove-contact', ({ phoneNumber }, callback) => {
@@ -978,10 +1254,42 @@ io.on('connection', (socket) => {
         if (!pseudo || !user) return callback?.({ success: false, error: 'Session invalide' });
 
         ensureUserDefaults(user);
-        user.contacts = user.contacts.filter(contact => contact !== normalizeStandalonePhone(phoneNumber));
+        const normalizedPhone = normalizeStandalonePhone(phoneNumber);
+        user.contacts = user.contacts.filter(contact => contact !== normalizedPhone);
+        delete user.contactNames[normalizedPhone];
         saveData();
+        broadcastUsers();
         broadcastStatuses();
         callback?.({ success: true, user: selfUserPayload(user) });
+    });
+
+    socket.on('sync-contacts', ({ contacts, replaceAll }, callback) => {
+        const pseudo = socketUsers[socket.id];
+        const user = persistentUsers[pseudo];
+        if (!pseudo || !user) return callback?.({ success: false, error: 'Session invalide' });
+
+        ensureUserDefaults(user);
+        const nextContacts = replaceAll ? [] : [...user.contacts];
+        const nextNames = replaceAll ? {} : { ...user.contactNames };
+
+        (Array.isArray(contacts) ? contacts : []).forEach(entry => {
+            const normalizedPhone = normalizeStandalonePhone(entry?.phoneNumber);
+            const label = String(entry?.label || '').trim().slice(0, 120);
+            if (!normalizedPhone || normalizedPhone === getUserPhone(user)) return;
+            if (!nextContacts.includes(normalizedPhone)) nextContacts.push(normalizedPhone);
+            if (label) nextNames[normalizedPhone] = label;
+        });
+
+        user.contacts = [...new Set(nextContacts)];
+        user.contactNames = nextNames;
+        saveData();
+        broadcastUsers();
+        broadcastStatuses();
+        callback?.({
+            success: true,
+            user: selfUserPayload(user),
+            matchedCount: contactDirectoryForUser(pseudo).length
+        });
     });
 
     socket.on('toggle-block-user', ({ pseudo }, callback) => {
@@ -1389,7 +1697,9 @@ io.on('connection', (socket) => {
             background: typeof background === 'string' ? background : null,
             createdAt: new Date().toISOString(),
             expiresAt: new Date(Date.now() + STATUS_TTL_MS).toISOString(),
-            viewedBy: [from]
+            viewedBy: [from],
+            likedBy: [],
+            repostOf: null
         };
         statuses.push(status);
         saveData();
@@ -1428,6 +1738,50 @@ io.on('connection', (socket) => {
         callback?.({ success: true });
     });
 
+    socket.on('toggle-status-like', ({ statusId }, callback) => {
+        const from = socketUsers[socket.id];
+        const status = statuses.find(item => item.id === statusId);
+        if (!from || !status || isExpired(status.expiresAt) || !canViewerSeeStatus(status.userPseudo, from)) {
+            return callback?.({ success: false, error: 'Statut introuvable' });
+        }
+        status.likedBy = Array.isArray(status.likedBy) ? status.likedBy : [];
+        const index = status.likedBy.indexOf(from);
+        if (index === -1) status.likedBy.push(from);
+        else status.likedBy.splice(index, 1);
+        saveData();
+        broadcastStatuses();
+        callback?.({ success: true, status: safeStatus(status, from) });
+    });
+
+    socket.on('repost-status', ({ statusId }, callback) => {
+        const from = socketUsers[socket.id];
+        const original = statuses.find(item => item.id === statusId);
+        if (!from || !original || isExpired(original.expiresAt) || !canViewerSeeStatus(original.userPseudo, from)) {
+            return callback?.({ success: false, error: 'Statut introuvable' });
+        }
+        const repost = {
+            id: uuidv4(),
+            userPseudo: from,
+            text: original.text || '',
+            mediaUrl: original.mediaUrl || null,
+            fileType: original.fileType || null,
+            fileName: original.fileName || null,
+            background: original.background || null,
+            createdAt: new Date().toISOString(),
+            expiresAt: new Date(Date.now() + STATUS_TTL_MS).toISOString(),
+            viewedBy: [from],
+            likedBy: [],
+            repostOf: {
+                statusId: original.id,
+                userPseudo: original.userPseudo
+            }
+        };
+        statuses.push(repost);
+        saveData();
+        broadcastStatuses();
+        callback?.({ success: true, status: safeStatus(repost, from) });
+    });
+
     socket.on('search-users', (query, callback) => {
         const from = socketUsers[socket.id];
         const rawQuery = String(query || '').trim();
@@ -1440,13 +1794,21 @@ io.on('connection', (socket) => {
                 const phoneMatch = normalizedDigits.length >= 3 && phone.replace(/\D/g, '').includes(normalizedDigits);
                 return pseudoMatch || phoneMatch;
             })
-            .map(user => ({
-                ...safeUser(user),
-                maskedPhoneNumber: maskPhoneNumber(getUserPhone(user)),
-                blocked: persistentUsers[from]?.blockedUsers?.includes(user.pseudo) || false,
-                inContacts: persistentUsers[from]?.contacts?.includes(getUserPhone(user)) || false
-            }));
+            .map(user => {
+                const visibleUser = safeUser(user, from);
+                return {
+                    ...visibleUser,
+                    maskedPhoneNumber: maskPhoneNumber(visibleUser.phoneNumber || ''),
+                    blocked: persistentUsers[from]?.blockedUsers?.includes(user.pseudo) || false,
+                    inContacts: persistentUsers[from]?.contacts?.includes(getUserPhone(user)) || false
+                };
+            });
         callback(results);
+    });
+
+    socket.on('logout', ({ sessionToken }, callback) => {
+        revokeSessionToken(sessionToken);
+        callback?.({ success: true });
     });
 
     socket.on('get-app-stats', callback => {
@@ -1506,13 +1868,13 @@ io.on('connection', (socket) => {
 
     socket.on('disconnect', () => {
         const pseudo = socketUsers[socket.id];
-        if (pseudo && persistentUsers[pseudo]) {
+        delete socketUsers[socket.id];
+        if (pseudo && persistentUsers[pseudo] && !_getSocketIdsForPseudo(pseudo).length) {
             persistentUsers[pseudo].online = false;
             persistentUsers[pseudo].lastSeen = new Date().toISOString();
             saveData();
             broadcastUsers();
         }
-        delete socketUsers[socket.id];
     });
 });
 
@@ -1539,6 +1901,14 @@ async function bootstrap() {
     messages = (loaded.messages || []).filter(msg => !isExpired(msg.expiresAt));
     groups = (loaded.groups || []).map(ensureGroupDefaults);
     statuses = (loaded.statuses || []).filter(status => !isExpired(status.expiresAt));
+    authSessions = new Map(
+        (Array.isArray(loaded.sessions) ? loaded.sessions : [])
+            .filter(session => session?.token && session?.pseudo && Number(session?.expiresAt || 0) > Date.now())
+            .map(session => [String(session.token), {
+                pseudo: String(session.pseudo),
+                expiresAt: Number(session.expiresAt)
+            }])
+    );
 
     // ── Log tous les users chargés depuis MongoDB ─────────────
     const allPseudos = Object.keys(persistentUsers);

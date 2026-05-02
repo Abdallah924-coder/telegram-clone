@@ -19,7 +19,15 @@
       ],
       "isAdmin": false,
       "email": "",
-      "emailVerified": false
+      "emailVerified": false,
+      "contactNames": {},
+      "callHistory": [],
+      "privacy": {
+        "profilePhoto": "everyone",
+        "presence": "contacts",
+        "phone": "contacts",
+        "status": "mutual-contacts"
+      }
     },
     {
       "pseudo": "Devoue",
@@ -28,7 +36,7 @@
       "bio": "",
       "createdAt": "2026-04-22T19:02:43.771Z",
       "online": true,
-      "lastSeen": "2026-05-01T21:21:20.879Z",
+      "lastSeen": "2026-05-02T12:33:10.033Z",
       "blockedUsers": [],
       "hiddenChats": {},
       "ephemeralSettings": {},
@@ -40,7 +48,15 @@
       ],
       "isAdmin": false,
       "email": "",
-      "emailVerified": false
+      "emailVerified": false,
+      "contactNames": {},
+      "callHistory": [],
+      "privacy": {
+        "profilePhoto": "everyone",
+        "presence": "contacts",
+        "phone": "contacts",
+        "status": "mutual-contacts"
+      }
     },
     {
       "pseudo": "Admin DevChat",
@@ -59,7 +75,15 @@
       "hiddenChats": {},
       "ephemeralSettings": {},
       "email": "",
-      "emailVerified": false
+      "emailVerified": false,
+      "contactNames": {},
+      "callHistory": [],
+      "privacy": {
+        "profilePhoto": "everyone",
+        "presence": "contacts",
+        "phone": "contacts",
+        "status": "mutual-contacts"
+      }
     }
   ],
   "messages": [
@@ -548,5 +572,29 @@
       "createdAt": "2026-04-24T01:17:23.259Z"
     }
   ],
-  "statuses": []
+  "statuses": [
+    {
+      "id": "09494a25-4f0d-46a3-abc5-d4129b61d973",
+      "userPseudo": "Devoue",
+      "text": "Salut",
+      "mediaUrl": null,
+      "fileType": null,
+      "fileName": null,
+      "background": "ocean",
+      "createdAt": "2026-05-02T12:34:07.305Z",
+      "expiresAt": "2026-05-03T12:34:07.305Z",
+      "viewedBy": [
+        "Devoue"
+      ],
+      "likedBy": [],
+      "repostOf": null
+    }
+  ],
+  "sessions": [
+    {
+      "token": "e0dd8f03285a16438718ebcf155d95ad9ece14b37b07d40c",
+      "pseudo": "Devoue",
+      "expiresAt": 1809261190035
+    }
+  ]
 }
