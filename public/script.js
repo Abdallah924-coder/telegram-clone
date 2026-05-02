@@ -739,7 +739,7 @@ $('registerBtn').addEventListener('click', async () => {
     const pw1    = $('regPassword').value;
     const pw2    = $('regPassword2').value;
     const otp = $('regOtp').value.trim();
-    if (!pseudo || !pw1 || !phoneNumber || !email || !otp) return showAuthError('registerError', 'Remplissez tous les champs');
+    if (!pseudo || !pw1 || !phoneNumber || !email) return showAuthError('registerError', 'Remplissez tous les champs principaux');
     if (!isValidEmail(email)) return showAuthError('registerError', 'Email invalide');
     if (pw1 !== pw2)     return showAuthError('registerError', 'Mots de passe différents');
     if (pw1.length < 4)  return showAuthError('registerError', 'Mot de passe trop court (min 4 caractères)');
@@ -762,6 +762,11 @@ $('sendRegisterOtpBtn').addEventListener('click', () => {
     socket.emit('request-register-otp', { pseudo, email, countryCode, phoneNumber }, (res) => {
         setButtonBusy('sendRegisterOtpBtn', false);
         if (!res?.success) return showAuthError('registerError', res?.error || 'Erreur');
+        if (res.otpOptional) {
+            $('registerSuccess').textContent = 'Vous pouvez créer le compte directement sans OTP.';
+            showToast('Inscription sans OTP activée');
+            return;
+        }
         $('registerSuccess').textContent = res.devOtp ? `OTP dev: ${res.devOtp}` : 'Code OTP envoyé sur votre email';
         showToast(res.devOtp ? `OTP dev: ${res.devOtp}` : 'Code OTP envoyé');
     });

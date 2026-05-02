@@ -44,13 +44,25 @@ const io = socketIo(server, {
 });
 
 const RENDER_STORAGE_ROOT = '/opt/render/project/src/storage';
+const RAILWAY_STORAGE_ROOT = '/app/storage';
+const LOCAL_STORAGE_ROOT = path.join(__dirname, 'storage');
 const LOCAL_DATA_FILE = path.join(__dirname, 'data.json');
 const LOCAL_UPLOADS_DIR = path.join(__dirname, 'public', 'uploads');
 const LOCAL_AVATARS_DIR = path.join(__dirname, 'public', 'avatars');
-const DEFAULT_STORAGE_ROOT = fs.existsSync(RENDER_STORAGE_ROOT) ? RENDER_STORAGE_ROOT : null;
-const DATA_FILE = process.env.DATA_FILE || (DEFAULT_STORAGE_ROOT ? path.join(DEFAULT_STORAGE_ROOT, 'data.json') : LOCAL_DATA_FILE);
-const UPLOADS_DIR = process.env.UPLOADS_DIR || (DEFAULT_STORAGE_ROOT ? path.join(DEFAULT_STORAGE_ROOT, 'uploads') : LOCAL_UPLOADS_DIR);
-const AVATARS_DIR = process.env.AVATARS_DIR || (DEFAULT_STORAGE_ROOT ? path.join(DEFAULT_STORAGE_ROOT, 'avatars') : LOCAL_AVATARS_DIR);
+const STORAGE_ROOT = String(process.env.STORAGE_ROOT || '').trim() || [
+    RENDER_STORAGE_ROOT,
+    RAILWAY_STORAGE_ROOT,
+    LOCAL_STORAGE_ROOT
+].find(candidate => {
+    try {
+        return fs.existsSync(candidate);
+    } catch (err) {
+        return false;
+    }
+}) || LOCAL_STORAGE_ROOT;
+const DATA_FILE = process.env.DATA_FILE || path.join(STORAGE_ROOT, 'data.json');
+const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(STORAGE_ROOT, 'uploads');
+const AVATARS_DIR = process.env.AVATARS_DIR || path.join(STORAGE_ROOT, 'avatars');
 const STATUS_TTL_MS = 24 * 60 * 60 * 1000;
 const UPDATE_CHANNEL_KEY = 'system:updates';
 const SESSION_TTL_MS = 365 * 24 * 60 * 60 * 1000;
@@ -62,6 +74,7 @@ const MONGODB_DB_NAME = String(process.env.MONGODB_DB_NAME || 'devchat').trim();
 const MONGODB_COLLECTION = String(process.env.MONGODB_COLLECTION || 'app_state').trim();
 const APP_STATE_DOC_ID = 'main';
 const ALLOW_INSECURE_PASSWORD_RESET = process.env.ALLOW_INSECURE_PASSWORD_RESET === 'true';
+const ALLOW_REGISTRATION_WITHOUT_OTP = process.env.ALLOW_REGISTRATION_WITHOUT_OTP !== 'false';
 const BREVO_API_KEY = String(process.env.BREVO_API_KEY || '').trim();
 const BREVO_SENDER_EMAIL = String(process.env.BREVO_SENDER_EMAIL || '').trim();
 const BREVO_SENDER_NAME = String(process.env.BREVO_SENDER_NAME || 'DevChat').trim();
@@ -82,6 +95,10 @@ let persistChain = Promise.resolve();
 const TRUSTED_UPLOAD_PATH_RE = /^\/uploads\/[a-zA-Z0-9._-]+$/;
 const TRUSTED_AVATAR_PATH_RE = /^\/avatars\/[a-zA-Z0-9._-]+$/;
 let pendingOtps = new Map();
+
+function isDurableStorageRoot(storageRoot) {
+    return [RENDER_STORAGE_ROOT, RAILWAY_STORAGE_ROOT].some(root => String(storageRoot || '').startsWith(root));
+}
 
 function normalizeCountryCode(value) {
     const digits = String(value || '').replace(/\D/g, '');
@@ -319,6 +336,15 @@ function currentDataSnapshot() {
 function writeLocalSnapshot(snapshot) {
     fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
     fs.writeFileSync(DATA_FILE, JSON.stringify(snapshot, null, 2));
+}
+
+function shouldSkipRegistrationOtp(email, otp) {
+    const normalizedEmail = normalizeEmail(email);
+    const normalizedOtp = String(otp || '').trim();
+    if (!ALLOW_REGISTRATION_WITHOUT_OTP) return false;
+    if (normalizedOtp) return false;
+    pendingOtps.delete(otpKey('register', normalizedEmail));
+    return true;
 }
 
 async function connectMongo() {
@@ -1089,8 +1115,10 @@ io.on('connection', (socket) => {
                 if (Object.values(persistentUsers).some(user => user.email && user.email === normalizedEmail)) {
                     return callback({ success: false, error: 'Cet email est déjà utilisé' });
                 }
-                const otpCheck = verifyOtpForEmail('register', normalizedEmail, providedOtp);
-                if (!otpCheck.ok) return callback({ success: false, error: otpCheck.error });
+                if (!shouldSkipRegistrationOtp(normalizedEmail, providedOtp)) {
+                    const otpCheck = verifyOtpForEmail('register', normalizedEmail, providedOtp);
+                    if (!otpCheck.ok) return callback({ success: false, error: otpCheck.error });
+                }
                 const hash = await bcrypt.hash(normalizedPassword, 10);
                 const newUser = ensureUserDefaults({
                     pseudo: normalizedPseudo,
@@ -1138,6 +1166,13 @@ io.on('connection', (socket) => {
         const normalizedPseudo = String(pseudo || '').trim();
         const normalizedPhone = normalizePhone(countryCode, phoneNumber);
         const normalizedEmail = normalizeEmail(email);
+        if (ALLOW_REGISTRATION_WITHOUT_OTP) {
+            return callback?.({
+                success: true,
+                message: 'OTP facultatif',
+                otpOptional: true
+            });
+        }
         if (!normalizedPseudo) return callback?.({ success: false, error: 'Pseudo requis' });
         if (!normalizedPhone) return callback?.({ success: false, error: 'Numero invalide' });
         if (!isValidEmail(normalizedEmail)) return callback?.({ success: false, error: 'Email invalide' });
@@ -1970,7 +2005,7 @@ async function bootstrap() {
             console.log(`MongoDB connected (${MONGODB_DB_NAME}/${MONGODB_COLLECTION})`);
         } else {
             ensureStorageBootstrap();
-            console.log('MongoDB disabled, using local JSON storage');
+            console.log(`MongoDB disabled, using JSON storage at ${DATA_FILE}`);
         }
     } catch (err) {
         console.error('MongoDB unavailable, fallback to local JSON storage:', err.message);
@@ -1999,6 +2034,15 @@ async function bootstrap() {
     // ── Log tous les users chargés depuis MongoDB ─────────────
     const allPseudos = Object.keys(persistentUsers);
     console.log(`📦 Users chargés depuis MongoDB: [${allPseudos.join(', ')}]`);
+    if (!mongoCollection) {
+        console.log(`💾 DATA_FILE=${DATA_FILE}`);
+        console.log(`💾 UPLOADS_DIR=${UPLOADS_DIR}`);
+        console.log(`💾 AVATARS_DIR=${AVATARS_DIR}`);
+        if (!isDurableStorageRoot(path.dirname(DATA_FILE))) {
+            console.warn('⚠️  Stockage local non durable détecté. Sans disque persistant ou MongoDB, les données seront réinitialisées au redémarrage.');
+        }
+    }
+    console.log(`🔐 Inscription sans OTP: ${ALLOW_REGISTRATION_WITHOUT_OTP ? 'activée' : 'désactivée'}`);
 
     ensureAdminAccount();
     ensureUpdatesChannel();
