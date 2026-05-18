@@ -30,6 +30,7 @@ let statuses = [];
 let statusUpload = null;
 let activeStatusGroup = [];
 let activeStatusIndex = 0;
+let activeStatusInsightsId = null;
 let appStats = null;
 let knownPrivateChats = [];
 let updateChannelInfo = null;
@@ -1067,6 +1068,19 @@ function groupedStatuses() {
         userPseudo,
         items: items.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt))
     }));
+}
+
+function getStatusById(statusId) {
+    return statuses.find(status => status.id === statusId && !isStatusExpired(status)) || null;
+}
+
+function getStatusIdentity(pseudo) {
+    const user = allUsers.find(entry => entry.pseudo === pseudo);
+    const contact = getRegisteredContacts().find(entry => entry.pseudo === pseudo);
+    return {
+        name: contact?.contactName || pseudo,
+        avatar: user?.avatar || contact?.avatar || dicebear(pseudo)
+    };
 }
 
 function renderStatusStrip() {
@@ -2976,6 +2990,7 @@ function renderMyStatuses() {
         const div = document.createElement('div');
         div.className = 'my-status-item';
         const textThumb = `<div class="my-status-thumb status-text-thumb" style="background:${statusBackgroundStyle(status.background)}">${escHtml((status.text || 'Texte').slice(0, 24))}</div>`;
+        const originLabel = status.repostOf?.userPseudo ? `Repartagé depuis ${escHtml(getStatusIdentity(status.repostOf.userPseudo).name)}` : '';
         div.innerHTML = `
             <img src="${currentUser.avatar}" class="my-status-avatar" alt="">
             ${status.mediaUrl
@@ -2986,7 +3001,14 @@ function renderMyStatuses() {
             }
             <div class="my-status-copy">
                 <div class="my-status-title">${escHtml(status.text || 'Statut média')}</div>
-                <div class="status-meta-sub">${formatTime(status.createdAt)} · ${status.likedByCount || 0} ❤️</div>
+                <div class="my-status-meta-row">
+                    <span>${formatTime(status.createdAt)}</span>
+                    <div class="my-status-metrics">
+                        <span class="status-metric-chip"><i class="fas fa-eye"></i>${status.viewedByCount || 0}</span>
+                        <span class="status-metric-chip reposts"><i class="fas fa-retweet"></i>${status.repostedByCount || 0}</span>
+                    </div>
+                </div>
+                ${originLabel ? `<div class="status-origin-line">${originLabel}</div>` : ''}
             </div>
             <button class="icon-btn my-status-menu" onclick="deleteStatus('${status.id}')"><i class="fas fa-ellipsis-v"></i></button>
         `;
@@ -3019,19 +3041,61 @@ function openStatusViewer(userPseudo) {
     renderActiveStatus();
 }
 
+function renderStatusInsightsList(listId, entries, emptyText, formatter) {
+    const list = $(listId);
+    if (!list) return;
+    if (!entries.length) {
+        list.innerHTML = `<div class="status-insight-empty">${escHtml(emptyText)}</div>`;
+        return;
+    }
+    list.innerHTML = entries.map(formatter).join('');
+}
+
+function openStatusInsightsModal(statusId) {
+    const status = getStatusById(statusId);
+    if (!status || status.userPseudo !== currentUser?.pseudo) return showToast('Détails indisponibles');
+    activeStatusInsightsId = status.id;
+    $('statusInsightsViewsCount').textContent = String(status.viewedByCount || 0);
+    $('statusInsightsRepostsCount').textContent = String(status.repostedByCount || 0);
+    renderStatusInsightsList('statusViewsList', status.seenBy || [], 'Aucune vue pour le moment', (user) => {
+        const identity = getStatusIdentity(user.pseudo);
+        return `
+            <div class="status-insight-item">
+                <img src="${identity.avatar}" alt="">
+                <div class="status-insight-copy">
+                    <div class="status-insight-name">${escHtml(identity.name)}</div>
+                    <div class="status-insight-sub">${escHtml(user.phoneNumber || user.pseudo || '')}</div>
+                </div>
+            </div>
+        `;
+    });
+    renderStatusInsightsList('statusRepostsList', status.repostedBy || [], 'Aucun repartage pour le moment', (user) => {
+        const identity = getStatusIdentity(user.pseudo);
+        return `
+            <div class="status-insight-item">
+                <img src="${identity.avatar}" alt="">
+                <div class="status-insight-copy">
+                    <div class="status-insight-name">${escHtml(identity.name)}</div>
+                    <div class="status-insight-sub">A repartagé votre statut</div>
+                </div>
+            </div>
+        `;
+    });
+    openModal('statusInsightsModal');
+}
+
 function renderActiveStatus() {
     if (!activeStatusGroup.length) return closeModal('statusViewerModal');
     const status = activeStatusGroup[activeStatusIndex];
     if (!status) return;
-    const contact = getRegisteredContacts().find(entry => entry.pseudo === status.userPseudo);
+    const isOwnStatus = status.userPseudo === currentUser?.pseudo;
+    const identity = getStatusIdentity(status.userPseudo);
     $('statusProgressBars').innerHTML = activeStatusGroup.map((item, index) => `<span class="${index <= activeStatusIndex ? 'seen' : ''}"></span>`).join('');
-    const viewerName = contact?.contactName || (status.userPseudo === currentUser?.pseudo ? 'Mon statut' : status.userPseudo);
-    const viewerAvatar = status.userPseudo === currentUser?.pseudo
-        ? currentUser.avatar
-        : (allUsers.find(user => user.pseudo === status.userPseudo)?.avatar || contact?.avatar || dicebear(status.userPseudo));
-    $('statusViewerAvatar').src = viewerAvatar;
-    $('statusViewerName').textContent = viewerName;
-    $('statusViewerSubtitle').textContent = `${formatTime(status.createdAt)}${status.userPseudo === currentUser?.pseudo ? ` · ${status.viewedByCount || 0} vues` : ''}`;
+    $('statusViewerAvatar').src = isOwnStatus ? currentUser.avatar : identity.avatar;
+    $('statusViewerName').textContent = isOwnStatus ? 'Mon statut' : identity.name;
+    $('statusViewerSubtitle').textContent = isOwnStatus
+        ? `${formatTime(status.createdAt)} · ${status.viewedByCount || 0} vues · ${status.repostedByCount || 0} repartages`
+        : formatTime(status.createdAt);
 
     const content = $('statusViewerContent');
     const caption = $('statusViewerCaption');
@@ -3049,8 +3113,10 @@ function renderActiveStatus() {
         caption.style.display = 'none';
     }
     if (status.mediaUrl) content.style.background = '';
-    $('likeStatusBtn').innerHTML = `<i class="fas fa-eye"></i><span>${status.viewedByCount || 0} vues</span>`;
-    $('repostStatusBtn').innerHTML = `${status.liked ? '<i class="fas fa-heart"></i>' : '<i class="far fa-heart"></i>'}<span>Booster</span>`;
+    $('statusInsightsBtn').innerHTML = isOwnStatus
+        ? `<i class="fas fa-eye"></i><span>${status.viewedByCount || 0} vues</span>`
+        : `${status.liked ? '<i class="fas fa-heart"></i>' : '<i class="far fa-heart"></i>'}<span>${status.likedByCount || 0} j'aime</span>`;
+    $('repostStatusBtn').innerHTML = `<i class="fas fa-retweet"></i><span>${status.repostedByCount || 0} repartages</span>`;
     $('shareStatusBtn').innerHTML = `<i class="fas fa-share-alt"></i><span>Partager</span>`;
 
     socket.emit('view-status', { statusId: status.id }, (res) => {
@@ -3063,13 +3129,21 @@ function renderActiveStatus() {
     });
 }
 
-$('likeStatusBtn').addEventListener('click', () => {
+$('statusInsightsBtn').addEventListener('click', () => {
     const status = activeStatusGroup[activeStatusIndex];
     if (!status) return;
-    const viewers = Array.isArray(status.seenBy) && status.seenBy.length
-        ? status.seenBy.map(user => user.pseudo).join(', ')
-        : 'Aucune vue pour le moment';
-    showToast(viewers, 3500);
+    if (status.userPseudo === currentUser?.pseudo) {
+        openStatusInsightsModal(status.id);
+        return;
+    }
+    socket.emit('toggle-status-like', { statusId: status.id }, (res) => {
+        if (!res?.success || !res.status) return showToast(res?.error || 'Erreur');
+        upsertStatus(res.status);
+        const localIdx = activeStatusGroup.findIndex(item => item.id === res.status.id);
+        if (localIdx !== -1) activeStatusGroup[localIdx] = res.status;
+        renderActiveStatus();
+        renderStatusStrip();
+    });
 });
 
 $('repostStatusBtn').addEventListener('click', () => {
@@ -3426,12 +3500,17 @@ function setupSocketListeners() {
         statuses = nextStatuses || [];
         if ($('statusViewerModal').classList.contains('open') && activeStatusGroup.length) {
             const owner = activeStatusGroup[0]?.userPseudo;
-            activeStatusGroup = statuses.filter(status => status.userPseudo === owner && !isStatusExpired(status));
+            activeStatusGroup = groupedStatuses().find(group => group.userPseudo === owner)?.items || [];
             if (!activeStatusGroup.length) closeModal('statusViewerModal');
             else {
                 activeStatusIndex = Math.min(activeStatusIndex, activeStatusGroup.length - 1);
                 renderActiveStatus();
             }
+        }
+        if ($('statusInsightsModal').classList.contains('open') && activeStatusInsightsId) {
+            const status = getStatusById(activeStatusInsightsId);
+            if (!status) closeModal('statusInsightsModal');
+            else openStatusInsightsModal(activeStatusInsightsId);
         }
         renderStatusStrip();
         if ($('statusComposerModal').classList.contains('open')) renderMyStatuses();
@@ -3440,6 +3519,10 @@ function setupSocketListeners() {
     socket.on('status-deleted', ({ statusId }) => {
         statuses = statuses.filter(status => status.id !== statusId);
         activeStatusGroup = activeStatusGroup.filter(status => status.id !== statusId);
+        if (activeStatusInsightsId === statusId) {
+            activeStatusInsightsId = null;
+            closeModal('statusInsightsModal');
+        }
         if (!activeStatusGroup.length) closeModal('statusViewerModal');
         else {
             activeStatusIndex = Math.min(activeStatusIndex, activeStatusGroup.length - 1);
@@ -3544,6 +3627,7 @@ function setupSocketListeners() {
 function openModal(id) { $(id).classList.add('open'); $(id).style.display = 'flex'; }
 function closeModal(id) {
     if (id === 'qrScannerModal') stopQrScanner();
+    if (id === 'statusInsightsModal') activeStatusInsightsId = null;
     $(id).classList.remove('open');
     $(id).style.display = 'none';
 }

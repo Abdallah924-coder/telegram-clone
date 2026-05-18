@@ -727,6 +727,10 @@ async function deliverOtpOrFallback({ purpose, email, otp, pseudo }) {
 
 function safeStatus(status, viewerPseudo) {
     const viewers = (status.viewedBy || []).filter(pseudo => pseudo !== status.userPseudo);
+    const repostedBy = statuses
+        .filter(item => !isExpired(item.expiresAt))
+        .filter(item => item?.repostOf?.statusId === status.id)
+        .filter(item => item.userPseudo !== status.userPseudo);
     return {
         id: status.id,
         userPseudo: status.userPseudo,
@@ -743,9 +747,13 @@ function safeStatus(status, viewerPseudo) {
         liked: !!viewerPseudo && status.likedBy?.includes(viewerPseudo),
         likedByCount: Array.isArray(status.likedBy) ? status.likedBy.length : 0,
         viewedByCount: viewers.length,
+        repostedByCount: repostedBy.length,
         repostOf: status.repostOf || null,
         seenBy: viewerPseudo === status.userPseudo
             ? viewers.map(pseudo => persistentUsers[pseudo] ? safeUser(persistentUsers[pseudo], viewerPseudo) : null).filter(Boolean)
+            : [],
+        repostedBy: viewerPseudo === status.userPseudo
+            ? repostedBy.map(item => persistentUsers[item.userPseudo] ? safeUser(persistentUsers[item.userPseudo], viewerPseudo) : null).filter(Boolean)
             : []
     };
 }
@@ -2000,11 +2008,11 @@ io.on('connection', (socket) => {
 
 async function bootstrap() {
     try {
+        ensureStorageBootstrap();
         if (MONGODB_URI) {
             await connectMongo();
             console.log(`MongoDB connected (${MONGODB_DB_NAME}/${MONGODB_COLLECTION})`);
         } else {
-            ensureStorageBootstrap();
             console.log(`MongoDB disabled, using JSON storage at ${DATA_FILE}`);
         }
     } catch (err) {
