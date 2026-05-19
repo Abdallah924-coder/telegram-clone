@@ -108,7 +108,7 @@ function buildProfileQrPayload() {
     const params = new URLSearchParams();
     params.set('pseudo', currentUser?.pseudo || '');
     if (currentUser?.phoneNumber) params.set('phone', currentUser.phoneNumber);
-    if (currentUser?.avatar) params.set('avatar', currentUser.avatar);
+    if (currentUser?.avatar && !String(currentUser.avatar).startsWith('data:')) params.set('avatar', currentUser.avatar);
     return `devchat://contact?${params.toString()}`;
 }
 

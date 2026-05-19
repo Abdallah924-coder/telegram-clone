@@ -88,12 +88,14 @@ const ALLOWED_UPLOAD_MIME_TYPES = new Set([
     'application/json',
     'text/plain'
 ]);
+const MAX_AVATAR_DATA_URL_LENGTH = 7 * 1024 * 1024;
 
 let mongoClient = null;
 let mongoCollection = null;
 let persistChain = Promise.resolve();
 const TRUSTED_UPLOAD_PATH_RE = /^\/uploads\/[a-zA-Z0-9._-]+$/;
 const TRUSTED_AVATAR_PATH_RE = /^\/avatars\/[a-zA-Z0-9._-]+$/;
+const TRUSTED_INLINE_AVATAR_RE = /^data:image\/(?:png|jpeg|webp|gif|svg\+xml);base64,[A-Za-z0-9+/=]+$/i;
 let pendingOtps = new Map();
 
 function isDurableStorageRoot(storageRoot) {
@@ -194,6 +196,7 @@ function normalizePrivacyValue(value, allowedValues, fallback) {
 }
 
 function ensureUserDefaults(user) {
+    user.avatar = normalizeAvatarValue(user.avatar) || `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(user.pseudo || 'User')}&backgroundColor=2aabee&fontFamily=Helvetica`;
     user.bio = user.bio || '';
     user.online = !!user.online;
     user.blockedUsers = Array.isArray(user.blockedUsers) ? user.blockedUsers : [];
@@ -493,6 +496,15 @@ function isAllowedUploadMime(file) {
     return ALLOWED_UPLOAD_MIME_PREFIXES.some(prefix => mime.startsWith(prefix)) || ALLOWED_UPLOAD_MIME_TYPES.has(mime);
 }
 
+function normalizeAvatarValue(value) {
+    const normalized = String(value || '').trim();
+    if (!normalized) return '';
+    if (TRUSTED_AVATAR_PATH_RE.test(normalized)) return normalized;
+    if (TRUSTED_INLINE_AVATAR_RE.test(normalized) && normalized.length <= MAX_AVATAR_DATA_URL_LENGTH) return normalized;
+    if (/^https?:\/\//i.test(normalized)) return normalized.slice(0, 2000);
+    return '';
+}
+
 function uploadFileFilter(req, file, cb) {
     if (!isAllowedUploadMime(file)) {
         return cb(new Error('Type de fichier non autorise'));
@@ -601,7 +613,7 @@ function safeUser(user, viewerPseudo = null) {
     const phoneVisible = privacyAllowsUser(user.pseudo, viewerPseudo, user.privacy?.phone || defaultPrivacySettings().phone);
     return {
         pseudo: user.pseudo,
-        avatar: avatarVisible ? user.avatar : '/icons/icon-128.png',
+        avatar: avatarVisible ? normalizeAvatarValue(user.avatar) || '/icons/icon-128.png' : '/icons/icon-128.png',
         bio: user.bio || '',
         online: presenceVisible ? (user.online || false) : false,
         lastSeen: presenceVisible ? user.lastSeen : null,
@@ -850,7 +862,7 @@ function sanitizeCallHistoryEntry(entry) {
     if (!pseudo) return null;
     return {
         pseudo: pseudo.slice(0, 80),
-        avatar: String(entry.avatar || '').trim().slice(0, 300),
+        avatar: normalizeAvatarValue(entry.avatar),
         mode: entry.mode === 'video' ? 'video' : 'audio',
         direction: entry.direction === 'incoming' ? 'incoming' : 'outgoing',
         status: String(entry.status || 'Terminé').trim().slice(0, 80) || 'Terminé',
@@ -1058,17 +1070,8 @@ const upload = multer({
     fileFilter: uploadFileFilter
 });
 
-const avatarStorage = multer.diskStorage({
-    destination: (req, file, cb) => {
-        if (!fs.existsSync(AVATARS_DIR)) fs.mkdirSync(AVATARS_DIR, { recursive: true });
-        cb(null, AVATARS_DIR);
-    },
-    filename: (req, file, cb) => {
-        cb(null, `avatar-${uuidv4().slice(0, 8)}${path.extname(file.originalname)}`);
-    }
-});
 const avatarUpload = multer({
-    storage: avatarStorage,
+    storage: multer.memoryStorage(),
     limits: { fileSize: 5 * 1024 * 1024 },
     fileFilter: avatarFileFilter
 });
@@ -1095,7 +1098,14 @@ app.post('/api/upload-avatar', requireUploadAuth, (req, res) => {
     avatarUpload.single('avatar')(req, res, err => {
         if (err) return res.status(400).json({ error: err.message || 'Upload impossible' });
         if (!req.file) return res.status(400).json({ error: 'Aucun fichier' });
-        res.json({ avatarUrl: `/avatars/${req.file.filename}` });
+        const mime = String(req.file.mimetype || '').toLowerCase();
+        if (!mime.startsWith('image/')) return res.status(400).json({ error: 'Image requise' });
+        const base64 = req.file.buffer.toString('base64');
+        const avatarUrl = `data:${mime};base64,${base64}`;
+        if (avatarUrl.length > MAX_AVATAR_DATA_URL_LENGTH) {
+            return res.status(400).json({ error: 'Image trop lourde pour un avatar persistant' });
+        }
+        res.json({ avatarUrl });
     });
 });
 
@@ -1283,7 +1293,11 @@ io.on('connection', (socket) => {
         if (!pseudo) return callback?.({ success: false });
         const user = persistentUsers[pseudo];
         if (!user) return callback?.({ success: false });
-        if (avatar) user.avatar = avatar;
+        if (avatar !== undefined) {
+            const normalizedAvatar = normalizeAvatarValue(avatar);
+            if (!normalizedAvatar) return callback?.({ success: false, error: 'Avatar invalide' });
+            user.avatar = normalizedAvatar;
+        }
         if (bio !== undefined) user.bio = bio;
         if (email !== undefined) {
             const normalizedEmail = normalizeEmail(email);
